@@ -380,6 +380,20 @@ body::before {
     }
 }
 
+.todo-doctor-bar {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(255,255,255,0.12);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.todo-doctor-bar[hidden] {
+    display: none;
+}
+
 </style>
 </head>
 
@@ -511,6 +525,11 @@ body::before {
                 <span id="remainingCount">20</span>
             </p>
 
+        </div>
+
+        <div id="todoDoctorBar" hidden class="todo-doctor-bar">
+            <span id="todoRoleNote" style="font-size:12px;color:#aeb8bd;">Read-only approved crew checklist</span>
+            <select id="todoAstSelect" aria-label="Select approved astronaut" style="background:#0a0f12;color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:10px;padding:8px 12px;font:13px Inter,sans-serif;"></select>
         </div>
 
     </section>
@@ -679,95 +698,154 @@ body::before {
 
 <script src="js/shell.js"></script>
 <script>
-
-const tasks = document.querySelectorAll('.task');
-
+const tasks = Array.from(document.querySelectorAll('.task'));
 const percentage = document.getElementById('percentage');
 const progressFill = document.getElementById('progressFill');
-
 const completedCount = document.getElementById('completedCount');
 const totalCount = document.getElementById('totalCount');
 const remainingCount = document.getElementById('remainingCount');
-
 const completeMessage = document.getElementById('completeMessage');
+const resetBtn = document.getElementById('resetBtn');
+const todoDoctorBar = document.getElementById('todoDoctorBar');
+const todoRoleNote = document.getElementById('todoRoleNote');
+const todoAstSelect = document.getElementById('todoAstSelect');
 
 const totalTasks = tasks.length;
 if (totalCount) totalCount.textContent = totalTasks;
 
+tasks.forEach((task, idx) => {
+    task.dataset.key = 'todo-' + String(idx + 1).padStart(2, '0');
+});
 
-// UPDATE PROGRESS
+let currentSession = null;
+let activeAstronautId = null;
+let isReadOnly = false;
+
+function applyTodoState(serverData) {
+    const map = {};
+    (serverData && serverData.items ? serverData.items : []).forEach(item => {
+        map[item.key] = Boolean(item.done);
+    });
+    tasks.forEach(task => {
+        const key = task.dataset.key;
+        const checkbox = task.querySelector('input');
+        checkbox.checked = Boolean(map[key]);
+        checkbox.disabled = isReadOnly;
+        task.classList.toggle('completed', checkbox.checked);
+    });
+    updateProgress();
+}
 
 function updateProgress() {
-
     let completed = 0;
-
     tasks.forEach(task => {
-
         const checkbox = task.querySelector('input');
-
         if (checkbox.checked) {
             completed++;
             task.classList.add('completed');
         } else {
             task.classList.remove('completed');
         }
-
     });
 
     const remaining = totalTasks - completed;
-
-    const progress = totalTasks > 0
-        ? Math.round((completed / totalTasks) * 100)
-        : 0;
+    const progress = totalTasks > 0 ? Math.round((completed / totalTasks) * 100) : 0;
 
     percentage.textContent = progress + '%';
-
     progressFill.style.width = progress + '%';
-
     completedCount.textContent = completed;
-
     remainingCount.textContent = remaining;
+    completeMessage.style.display = completed === totalTasks && totalTasks > 0 ? 'block' : 'none';
 
-    completeMessage.style.display =
-        completed === totalTasks && totalTasks > 0 ? 'block' : 'none';
-
-    if (window.VV_SHELL && window.VV_SHELL.setTodoProgress) {
+    if (!isReadOnly && window.VV_SHELL && window.VV_SHELL.setTodoProgress) {
         window.VV_SHELL.setTodoProgress(progress);
     }
-
 }
 
-
-// CHECKBOX EVENTS
+async function loadTodoFor(aid) {
+    if (!aid) return;
+    activeAstronautId = aid;
+    const res = await fetch('/api/todo/' + encodeURIComponent(aid), { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const data = await res.json();
+    isReadOnly = Boolean(data.readonly);
+    if (resetBtn) resetBtn.hidden = isReadOnly;
+    applyTodoState(data);
+}
 
 tasks.forEach(task => {
-
     const checkbox = task.querySelector('input');
-
-    checkbox.addEventListener('change', updateProgress);
-
-});
-
-
-// RESET DAY
-
-document.getElementById('resetBtn').addEventListener('click', () => {
-
-    tasks.forEach(task => {
-
-        task.querySelector('input').checked = false;
-
+    checkbox.addEventListener('change', async () => {
+        if (isReadOnly || !activeAstronautId || !currentSession) {
+            checkbox.checked = !checkbox.checked;
+            return;
+        }
+        const key = task.dataset.key;
+        const res = await fetch(
+            '/api/todo/' + encodeURIComponent(activeAstronautId) + '/items/' + encodeURIComponent(key),
+            {
+                method: 'PATCH',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': currentSession.csrf_token || ''
+                },
+                body: JSON.stringify({ done: checkbox.checked })
+            }
+        );
+        if (res.ok) {
+            applyTodoState(await res.json());
+        } else {
+            checkbox.checked = !checkbox.checked;
+            updateProgress();
+        }
     });
-
-    updateProgress();
-
 });
 
+if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+        if (isReadOnly || !activeAstronautId || !currentSession) return;
+        const res = await fetch('/api/todo/' + encodeURIComponent(activeAstronautId) + '/reset', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': currentSession.csrf_token || '' }
+        });
+        if (res.ok) {
+            applyTodoState(await res.json());
+        }
+    });
+}
 
-// INITIAL UPDATE
-
-updateProgress();
-
+(async function initTodo() {
+    if (!window.VV_SHELL || !window.VV_SHELL.getSession) return;
+    const sess = await window.VV_SHELL.getSession();
+    if (!sess || !sess.authenticated) {
+        window.location.href = '/login.html';
+        return;
+    }
+    currentSession = sess;
+    if (sess.role === 'astronaut' && sess.user && sess.user.astronaut_id) {
+        await loadTodoFor(sess.user.astronaut_id);
+        return;
+    }
+    if (sess.role === 'doctor') {
+        isReadOnly = true;
+        if (resetBtn) resetBtn.hidden = true;
+        if (todoDoctorBar) todoDoctorBar.hidden = false;
+        const docRes = await fetch('/api/doctor/astronauts', { credentials: 'same-origin' });
+        const docData = docRes.ok ? await docRes.json() : { approved: [] };
+        const approved = docData.approved || [];
+        if (!approved.length) {
+            if (todoRoleNote) todoRoleNote.textContent = 'No approved astronauts linked yet. Visit your Profile to request access.';
+            if (todoAstSelect) todoAstSelect.hidden = true;
+            tasks.forEach(t => { t.querySelector('input').disabled = true; });
+            return;
+        }
+        todoAstSelect.innerHTML = approved.map(a => `<option value="${window.VV_SHELL.esc(a.id)}">${window.VV_SHELL.esc(a.id + ' — ' + a.name)}</option>`).join('');
+        todoAstSelect.addEventListener('change', () => loadTodoFor(todoAstSelect.value));
+        await loadTodoFor(approved[0].id);
+    }
+})();
 </script>
 
 </body>

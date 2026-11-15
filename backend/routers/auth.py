@@ -1,6 +1,7 @@
 """Authentication & session state routes (/api/auth/*)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import sqlite3
 from typing import Any
 
@@ -13,7 +14,9 @@ from backend.security import (
     authenticate_web_user,
     create_web_session,
     get_session_user,
+    hash_password,
     require_csrf,
+    verify_password,
 )
 from backend.services.signup_service import register_account
 
@@ -33,6 +36,12 @@ class SignupRequest(BaseModel):
     fullName: str
     password: str
     confirmPassword: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
 
 
 def _profile_summary(con: sqlite3.Connection, user: dict[str, Any]) -> dict[str, Any]:
@@ -134,6 +143,45 @@ def logout(
     return {"ok": True}
 
 
+@router.post("/logout-all")
+def logout_all(
+    response: Response,
+    user: dict[str, Any] = Depends(require_csrf),
+    con: sqlite3.Connection = Depends(get_db),
+) -> dict[str, Any]:
+    """Revoke every active web session for this user across all browsers/devices."""
+    cur = con.execute("UPDATE web_sessions SET revoked = 1 WHERE user_id = ?", (int(user["user_id"]),))
+    con.commit()
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True, "revoked_count": cur.rowcount}
+
+
+@router.put("/password")
+def change_password(
+    payload: PasswordChangeRequest,
+    user: dict[str, Any] = Depends(require_csrf),
+    con: sqlite3.Connection = Depends(get_db),
+) -> dict[str, Any]:
+    """Verify current password via argon2-cffi, update password hash, and revoke other sessions."""
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be at least 8 characters.")
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New passwords do not match.")
+
+    row = con.execute("SELECT password_hash FROM users WHERE id = ?", (int(user["user_id"]),)).fetchone()
+    if row is None or not verify_password(payload.current_password, str(row["password_hash"])):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect.")
+
+    new_hash = hash_password(payload.new_password)
+    con.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, int(user["user_id"])))
+    con.execute(
+        "UPDATE web_sessions SET revoked = 1 WHERE user_id = ? AND session_id != ?",
+        (int(user["user_id"]), user["session_id"]),
+    )
+    con.commit()
+    return {"ok": True}
+
+
 @router.get("/me")
 def me(
     user: dict[str, Any] | None = Depends(get_session_user),
@@ -196,6 +244,22 @@ def me(
             unread_count = int(arow["unread"] or 0)
             unack_danger = int(arow["danger"] or 0)
 
+    todo_percent = 0
+    avatar_url = None
+    if user["role"] == "astronaut" and user.get("astronaut_id"):
+        today = datetime.now(timezone.utc).date().isoformat()
+        trow = con.execute(
+            "SELECT SUM(CASE WHEN done = 1 THEN 1 ELSE 0 END) AS done_cnt FROM daily_todo WHERE astronaut_id = ? AND todo_date = ?",
+            (user["astronaut_id"], today),
+        ).fetchone()
+        done_cnt = int((trow["done_cnt"] if trow else 0) or 0)
+        todo_percent = min(100, round((done_cnt / 20) * 100))
+        prow = con.execute("SELECT profile_photo, profile_avatar FROM astronaut_profile WHERE astronaut_id = ?", (user["astronaut_id"],)).fetchone()
+        if prow:
+            nav_av = prow["profile_avatar"] or prow["profile_photo"]
+            if nav_av and str(nav_av).startswith("/api/media/"):
+                avatar_url = str(nav_av)
+
     return {
         "authenticated": True,
         "role": user["role"],
@@ -204,6 +268,7 @@ def me(
             "vitalverse_id": user["vitalverse_id"],
             "name": name,
             "initials": initials,
+            "avatar_url": avatar_url,
             "role": user["role"],
             "astronaut_id": user["astronaut_id"],
             "profile": prof,
@@ -211,5 +276,5 @@ def me(
         "unread_alert_count": unread_count,
         "unack_danger_count": unack_danger,
         "pending_access_count": pending_count,
-        "todo_percent": 0,
+        "todo_percent": todo_percent,
     }

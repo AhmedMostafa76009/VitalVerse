@@ -228,7 +228,7 @@ SYNONYMS = [
     (r"\btrained\b|\btraining\b", "train"),
     (r"\bstressed\b|\bstress\b|\banxious\b|\banxiety\b|\bnervous\b|\birritable\b", "stressed"),
     (r"\bcalming\b|\bcalm\b|\brelaxing\b", "relax"),
-    (r"\bunmotivated\b|\bisolated\b|\bisolation\b|\bdepressed\b|\bsad\b", "mental health"),
+    (r"\bunmotivated\b|\bisolated\b|\bisolation\b|\bdepressed\b|\bsad\b|\blonely\b|\bloneliness\b|\bhomesick\b|\boverwhelmed\b|\bfeeling down\b", "mental health"),
     (r"\breaction game\b|\bpvt\b", "game test"),
     (r"\bbones\b|\bbone density\b|\bbone loss\b|\bbone mass\b", "bone"),
     (r"\bmuscles\b|\bmuscular\b", "muscle"),
@@ -288,8 +288,8 @@ PERSONAL_HEALTH_CONTEXT = re.compile(
     r"flight surgeon|countermeasure\w*|alert\w*|warning\w*|danger|"
     r"heart rate|blood pressure|systolic|diastolic|oxygen saturation|spo2|"
     r"bone|muscle|immune|cortisol|hormone\w*|temperature|blood glucose|glucose|blood sugar|"
-    r"sleep|mood|relax\w*|stressed|mental health|game test|exercise|cardio|resistance|train\w*|"
-    r"chest pain|left arm|passed out|fainted|short of breath|lightheaded|dizzy|headache|ache\w*|weak\w*|tired|exhausted"
+    r"sleep|mood|relax\w*|stressed|mental health|lonely|loneliness|homesick|overwhelmed|game test|exercise|cardio|resistance|train\w*|"
+    r"chest pain|left arm|passed out|fainted|short of breath|lightheaded|dizzy|headache|ache\w*|weak\w*|tired|exhausted|confused|confusion|disoriented"
     r")\b"
 )
 
@@ -300,6 +300,7 @@ URGENT_SYMPTOM_PATTERN = re.compile(
     r"\bleft arm\b.*\bnumb\b|\bnumb\b.*\bleft arm\b|"
     r"\b(passed out|fainted|fainting|syncope|unconscious|blacked out)\b|"
     r"\b(severe shortness of breath|can t breathe|cannot breathe|struggling to breathe|short of breath)\b|"
+    r"\b(confusion|disoriented)\b|\b(feeling|sudden|am|feel)\s+confused\b|"
     r"\b(headache|dizzy|lightheaded)\b.*\b(blood pressure|bp|systolic|oxygen|spo2|emergency|dropped)\b|"
     r"\b(blood pressure|bp|systolic|oxygen|spo2|dropped)\b.*\b(headache|dizzy|lightheaded|emergency)\b"
     r")"
@@ -342,11 +343,11 @@ relaxed relax mental assessment game test reaction psychological train trained m
 list task exercise cardio resistance session countermeasures left remaining done finished completed logged profile record
 blood type allergies allergic age old weight weigh height tall role nationality surgeries surgery injuries immunization
 family medical history previous flights gender name baseline pre flight preflight launch mission before song photo stressed
-calm play open hear see anxious irritable isolated unmotivated breathing eva flight surgeon contact details earth
+calm play open hear see anxious irritable isolated unmotivated lonely loneliness homesick overwhelmed breathing eva flight surgeon contact details earth
 destination spacecraft aircraft days day replay happened if suppose simulate change changes risk correlation information
 data sources facts verified advice answers based trust device real app normal high low ok okay fine good bad current latest
 compare look holding quickly fast slow take last went off put time help need want feel feeling know view display vitals
-week month yesterday morning dizzy lightheaded headache chest pain arm numb passed fainted emergency""".split())
+week month yesterday morning dizzy lightheaded headache chest pain arm numb passed fainted confused confusion disoriented emergency""".split())
 
 FABRICATION = r"\b(make up|made up|invent|pretend|fabricate|fake|imagine|guess|just say|lie about|assume i)\b"
 MEDICATION = (
@@ -661,11 +662,18 @@ class OfflineChatbot:
             p = he.get_profile(astronaut_id)
             surgeon = p["profile"]["contact_flight_surgeon"] if p.get("ok") else "ground medical control"
             escalation_banner = (
-                f"URGENT ESCALATION: Contact the flight surgeon immediately ({surgeon}). "
-                "Stop current exertion and initiate real-time ground medical telemetry review.\n"
+                f"URGENT ESCALATION: Contact the flight surgeon immediately — please contact your flight surgeon now ({surgeon}). "
+                "Pause activity and begin live ground medical review.\n"
             )
             if "contact the flight surgeon immediately" not in body.lower():
                 body = escalation_banner + body
+
+        body = self._gentle_finalize(
+            body,
+            question=question,
+            sources=sources,
+            warn_or_danger=self._is_warning_or_danger(astronaut_id),
+        )
 
         return self._pack(
             body,
@@ -700,74 +708,254 @@ class OfflineChatbot:
             "urgent_escalation": urgent_escalation,
         }
 
-    # ------------------------------------------------------------------ building blocks
+    # ------------------------------------------------------------------ gentle tone & formatting helpers
+    _FRIENDLY_LABELS: Dict[str, Tuple[str, str]] = {
+        "heart_rate": ("resting heart rate", "bpm"),
+        "systolic_bp": ("systolic blood pressure", "mmHg"),
+        "diastolic_bp": ("diastolic blood pressure", "mmHg"),
+        "oxygen_saturation": ("oxygen saturation", "%"),
+        "temperature": ("body temperature", "°C"),
+        "blood_glucose_mg_dl": ("blood glucose", "mg/dL"),
+        "bone_health": ("bone health index", "%"),
+        "muscle_health": ("muscle health index", "/100"),
+        "cardio_session_min": ("cardio duration", "min"),
+        "resistance_training_min": ("resistance duration", "min"),
+        "daily_physical_activity_min": ("daily activity", "min"),
+        "immunity_indicators": ("immune resilience", "PU"),
+        "hormones": ("cortisol stress hormone", "PU"),
+        "sleep_hours": ("sleep duration", "h"),
+        "relaxation": ("relaxation rating", "/10"),
+        "mood": ("mood score", "/10"),
+        "mental_health_assessment": ("mental wellbeing score", "/100"),
+        "game_test_score": ("reaction score", "/100"),
+        "daily_training_hours": ("daily training", "h"),
+    }
+
+    _DETAIL_REQUEST_RE = re.compile(
+        r"\b(more detail|in detail|detailed|explain more|longer|step by step|everything|full breakdown|all numbers)\b",
+        re.IGNORECASE,
+    )
+
+    _DIAGNOSIS_CLEAN_RULES: Tuple[Tuple[re.Pattern[str], str], ...] = (
+        (re.compile(r"\bhypoglycemia\b", re.IGNORECASE), "lower-than-usual glucose"),
+        (re.compile(r"\bhyperglycemia\b", re.IGNORECASE), "elevated glucose"),
+        (re.compile(r"\bhypertension\b", re.IGNORECASE), "elevated blood pressure"),
+        (re.compile(r"\bdiabetes\b", re.IGNORECASE), "glucose regulation"),
+        (re.compile(r"\binsomnia\b", re.IGNORECASE), "difficulty sleeping"),
+        (re.compile(r"\bdiagnosis\b|\bdiagnose[sd]?\b", re.IGNORECASE), "clinical assessment"),
+        (re.compile(r"\binfection\b", re.IGNORECASE), "immune strain"),
+        (re.compile(r"\bdisorder\b", re.IGNORECASE), "pattern"),
+        (re.compile(r"\bsick\b|\billness\b", re.IGNORECASE), "under strain"),
+    )
+
     @staticmethod
     def _need(res: Dict[str, Any]) -> Dict[str, Any]:
         if not res.get("ok"):
             raise _Refuse(res.get("error", "engine error"))
         return res
 
+    def _first_name(self, aid: str) -> Optional[str]:
+        res = he.get_profile(aid)
+        if not res.get("ok"):
+            return None
+        name = str(res["profile"].get("name") or "").strip()
+        if not name:
+            return None
+        for token in name.split():
+            cleaned = token.strip(".")
+            if cleaned.lower() not in ("dr", "cpt", "cdr", "lt", "col"):
+                return cleaned
+        return name.split()[0]
+
+    def _greet(self, aid: str, warm_empathy: bool = False) -> str:
+        fn = self._first_name(aid)
+        if warm_empathy:
+            return f"That sounds tiring, {fn} — let's look at it together." if fn else "That sounds tiring — let's look at it together."
+        return f"Thanks for checking in, {fn}." if fn else "Thanks for checking in."
+
+    @staticmethod
+    def _fmt_num(v: Any) -> str:
+        if v is None:
+            return "n/a"
+        f = float(v)
+        return f"{int(round(f))}" if abs(f - round(f)) < 0.05 else f"{f:.1f}"
+
+    def _pct_phrase(self, val: Any, base: Any, unit: str) -> str:
+        if val is None or base is None or abs(float(base)) < 1e-9:
+            return "with no pre-mission baseline on record"
+        pct = ((float(val) - float(base)) / float(base)) * 100.0
+        base_s = f"{self._fmt_num(base)} {unit}".strip()
+        if abs(pct) < 1.0:
+            return f"right in line with your pre-mission baseline of {base_s}"
+        direction = "above" if pct > 0 else "below"
+        return f"about {abs(pct):.0f}% {direction} your pre-mission baseline of {base_s}"
+
+    def _metric_sentence(self, key: str, dev: Dict[str, Any], verb: str = "is") -> str:
+        label, unit = self._FRIENDLY_LABELS.get(key, (key.replace("_", " "), dev.get("unit") or ""))
+        val = dev.get("value")
+        base = dev.get("baseline_mean")
+        if val is None:
+            return f"Your {label} measurement for today is currently missing."
+        val_s = f"{self._fmt_num(val)} {unit}".strip()
+        return f"Your {label} today {verb} {val_s}, {self._pct_phrase(val, base, unit)}."
+
+    @staticmethod
+    def _is_warning_or_danger(aid: str) -> bool:
+        try:
+            card = he.astronaut_card(aid)
+            if not card.get("ok"):
+                return False
+            if card.get("predicted_class") in ("Health_Warning", "Medical_Danger_Alert"):
+                return True
+            zones = card.get("zones") or {}
+            return any(v in ("yellow", "red") for v in zones.values())
+        except Exception:
+            return False
+
+    def _gentle_finalize(self, body: str, *, question: str, sources: str, warn_or_danger: bool) -> str:
+        text = body
+        for pat, repl in self._DIAGNOSIS_CLEAN_RULES:
+            text = pat.sub(repl, text)
+
+        surgeon_line = "Please contact your flight surgeon to review these numbers together."
+        if warn_or_danger and "contact your flight surgeon" not in text.lower():
+            text = f"{text}\n{surgeon_line}"
+
+        if self._DETAIL_REQUEST_RE.search(question):
+            return text.strip()
+
+        footer_words = len(f"{rf.DISCLAIMER}\nSources: {sources}".split())
+        max_body_words = max(45, 118 - footer_words)
+        words = text.split()
+        if len(words) <= max_body_words:
+            return text.strip()
+
+        if warn_or_danger and "contact your flight surgeon" in surgeon_line.lower():
+            reserved = surgeon_line.split()
+            keep_n = max(35, max_body_words - len(reserved) - 1)
+            head = " ".join(words[:keep_n]).rstrip(",;:")
+            if head and head[-1] not in ".!?":
+                head += "."
+            return f"{head}\n{surgeon_line}".strip()
+
+        head = " ".join(words[:max_body_words]).rstrip(",;:")
+        if head and head[-1] not in ".!?":
+            head += "."
+        return head.strip()
+
+    @staticmethod
+    def _actions_block(items: List[str], warn_or_danger: bool = False) -> str:
+        steps = [s.strip().rstrip(".") + "." for s in items if s and s.strip()]
+        if warn_or_danger and not any("contact your flight surgeon" in s.lower() for s in steps):
+            if len(steps) >= 3:
+                steps = steps[:2]
+            steps.append("Contact your flight surgeon to review these readings together.")
+        steps = steps[:3]
+        if not steps:
+            return ""
+        return "Next steps: " + " ".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
+
     @staticmethod
     def _linked(la: Dict[str, Any]) -> str:
         t = la.get("type")
         if t == "todo":
             left = [i["task"] for i in la["todo"]["items"] if not i["done"]]
-            return "To-Do list: " + ("still open today: " + ", ".join(left) if left else "all exercise tasks done today") + "."
-        if t == "sleep_schedule":
-            return (
-                f"Sleep schedule: your baseline is {la['your_baseline_sleep_hours']} h, your last 7 days average "
-                f"{la['last_7_days_mean_sleep_hours']} h. Calming option: song {la['calming']['file']} or family photo "
-                f"{la['calming']['alternative']['file']}."
-            )
-        if t == "todo_and_sleep_schedule":
-            left = [i["task"] for i in la["todo"]["items"] if not i["done"]]
-            return (
-                f"To-Do list: {'open: ' + ', '.join(left) if left else 'all done today'}. Sleep schedule: baseline "
-                f"{la['your_baseline_sleep_hours']} h vs last 7 days {la['last_7_days_mean_sleep_hours']} h. "
-                f"Calming option: song {la['calming']['file']}."
-            )
+            return ("Complete open To-Do workout: " + ", ".join(left[:2])) if left else "Keep up your completed exercise routine"
+        if t in ("sleep_schedule", "todo_and_sleep_schedule"):
+            return f"Protect sleep tonight (baseline {la['your_baseline_sleep_hours']} h) and unwind with song {la['calming']['file']}"
         if t == "calming":
-            return f"Calming action: play your song ({la['file']}) or open your family photo ({la['alternative']['file']})."
+            return f"Play your calming song ({la['file']}) or view your family photo ({la['alternative']['file']})"
         if t == "contact_flight_surgeon":
-            return f"Contact the flight surgeon immediately: {la['contact']}."
+            return f"Contact your flight surgeon ({la['contact']})"
         return ""
 
     def _explain_text(self, ex: Dict[str, Any]) -> str:
-        """(a) current vs baseline, (b) why, (c) how to fix - from one health_engine explanation dict."""
-        cvb = "; ".join(ex["current_vs_baseline"]) or "no single indicator is outside your personal band today"
-        fix = ex["how_to_fix"]
+        """Concise, warm (a) current vs baseline, (b) why, (c) how to fix."""
+        cvb_list = ex.get("current_vs_baseline") or []
+        cvb = "; ".join(cvb_list[:2]) or "indicators remain near your personal band"
+        why_raw = str(ex.get("why") or "").strip().split(".")[0]
+        fix = ex.get("how_to_fix") or {}
+        advice_short = str(fix.get("advice_text") or "").strip().split(".")[0]
+        linked = self._linked(fix.get("linked_action", {}))
+        actions = [a for a in (advice_short, linked) if a][:2]
+        fix_line = " ".join(f"{i + 1}. {a.rstrip('.')}." for i, a in enumerate(actions))
         return (
-            f"- {ex['what']}\n"
-            f"  (a) Current vs your baseline: {cvb}.\n"
-            f"  (b) Why: {ex['why']}\n"
-            f"  (c) How to avoid or fix it: {fix['advice_text']} {self._linked(fix.get('linked_action', {}))}"
+            f"{ex['what'].split('.')[0]}.\n"
+            f"(a) Current vs your baseline: {cvb}.\n"
+            f"(b) Why: {why_raw}.\n"
+            f"(c) How to avoid or fix it: {fix_line}"
         )
 
-    def _zone_answer(self, aid: str, zone: str) -> Tuple[str, str]:
+    def _pick_zone_indicators(self, zone: str, norm: str, inds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        priority_patterns = {
+            "Cardiovascular": [
+                (r"heart|pulse", ["heart_rate", "systolic_bp"]),
+                (r"blood pressure|systolic|diastolic", ["systolic_bp", "diastolic_bp", "heart_rate"]),
+                (r"oxygen", ["oxygen_saturation", "heart_rate"]),
+            ],
+            "Immune": [
+                (r"temperature|fever", ["temperature", "immunity_indicators"]),
+                (r"cortisol|hormone", ["hormones", "immunity_indicators"]),
+            ],
+            "Sleep_Brain": [
+                (r"sleep|tired|groggy", ["sleep_hours", "mood"]),
+                (r"mood|mental health|stressed|relax", ["mood", "sleep_hours"]),
+                (r"game", ["game_test_score", "sleep_hours"]),
+                (r"train|exercise|activity", ["daily_training_hours", "mood"]),
+            ],
+            "Bone_Muscle": [
+                (r"bone", ["bone_health", "muscle_health"]),
+                (r"muscle|legs|back", ["muscle_health", "bone_health"]),
+            ],
+        }
+        by_name = {it["indicator"]: it for it in inds}
+        for pat, names in priority_patterns.get(zone, []):
+            if re.search(pat, norm):
+                picked = [by_name[n] for n in names if n in by_name]
+                if picked:
+                    return picked[:2]
+        ranked = sorted(inds, key=lambda it: abs(float(it.get("z") or 0.0)), reverse=True)
+        return ranked[:2]
+
+    def _zone_answer(self, aid: str, zone: str, norm: str = "") -> Tuple[str, str]:
         ev = self._need(he.explain_alert(aid, zone))
         card = self._need(he.earth_doctor_card(aid, last_n_days=1))
-        lines = [
-            f"{rf.ZONE_TITLES[zone]} - mission day {ev['mission_day']} - zone status: "
-            f"{card['diagnostic_breakdown'][zone]['status'].upper()}"
-        ]
-        for it in card["diagnostic_breakdown"][zone]["indicators"]:
-            z = "n/a" if it.get("z") is None else f"{it['z']:+.2f} SD"
-            if it["indicator"] in ("bone_health", "muscle_health"):
-                z = "see loss rate below"
-            badge = f" [{it.get('ui_badge', 'NASA standard')}]" if it.get("ui_badge") else ""
-            lines.append(
-                f"  {it['indicator']}: {it['value']} {it['unit']} (your pre-flight baseline "
-                f"{it['baseline_mean']} +/- {it['baseline_std']}; {z}){badge}"
+        z_data = card["diagnostic_breakdown"][zone]
+        z_status = str(z_data["status"]).lower()
+        warn_or_danger = z_status in ("yellow", "red") or card.get("predicted_class") in (
+            "Health_Warning",
+            "Medical_Danger_Alert",
+        )
+        empathy = warn_or_danger or bool(re.search(r"sleep|tired|stressed|mental health|pain|weak|fever", norm))
+        greet = self._greet(aid, warm_empathy=empathy)
+
+        picked = self._pick_zone_indicators(zone, norm, z_data["indicators"])
+        metrics_text = " ".join(self._metric_sentence(it["indicator"], it) for it in picked)
+
+        extra = ""
+        info = z_data.get("info")
+        if zone == "Bone_Muscle" and info:
+            extra = (
+                f" 30-day bone trend is {info['bone_loss_pct_per_month_trailing_30d']} %/month "
+                f"with {info['sessions_last_7_days']['cardio_done']} cardio and "
+                f"{info['sessions_last_7_days']['resistance_done']} resistance sessions this week."
             )
-        info = card["diagnostic_breakdown"][zone]["info"]
-        if info:
-            lines.append(
-                f"  bone loss over the last 30 days: {info['bone_loss_pct_per_month_trailing_30d']} %/month; "
-                f"sessions done in the last 7 days: cardio {info['sessions_last_7_days']['cardio_done']}, "
-                f"resistance {info['sessions_last_7_days']['resistance_done']}"
-            )
-        lines.append(self._explain_text(ev))
-        return "\n".join(lines), (
+
+        steps: List[str] = []
+        linked_str = self._linked((ev.get("how_to_fix") or {}).get("linked_action", {}))
+        if linked_str:
+            steps.append(linked_str)
+        if zone == "Cardiovascular":
+            steps.append("Take 5 slow breaths seated and re-check readings after resting")
+        elif zone == "Bone_Muscle":
+            steps.append("Complete today's scheduled ARED resistance and treadmill block")
+        elif zone == "Immune":
+            steps.append("Stay hydrated, prioritize rest tonight, and note any new physical symptoms")
+        elif zone == "Sleep_Brain":
+            steps.append("Dim cabin lights 45 minutes before bed for steadier sleep recovery")
+
+        body = f"{greet} {metrics_text}{extra}\n{self._actions_block(steps, warn_or_danger=warn_or_danger)}"
+        return body, (
             "mission_telemetry, preflight_baseline, countermeasures, "
             "health_engine.explain_alert, health_engine.earth_doctor_card"
         )
@@ -775,127 +963,198 @@ class OfflineChatbot:
     # ------------------------------------------------------------------ intent handlers
     def _a_status(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         c = self._need(he.astronaut_card(aid))
-        zones = ", ".join(f"{rf.ZONE_TITLES[z]}={s}" for z, s in c["zones"].items())
-        lines = [f"{c['name']}, mission day {c['mission_day']}: {c['status']}", f"Body zones: {zones}."]
+        doc = self._need(he.earth_doctor_card(aid, last_n_days=1))
+        devs = doc.get("baseline_deviations") or {}
+        warn_or_danger = c["status_class"] in ("Health_Warning", "Medical_Danger_Alert") or any(
+            v in ("yellow", "red") for v in c["zones"].values()
+        )
+        greet = self._greet(aid, warm_empathy=warn_or_danger)
+        status_phrase = c["status_class"].replace("_", " ").lower()
+        hr_text = self._metric_sentence("heart_rate", devs["heart_rate"]) if "heart_rate" in devs else ""
+        sl_text = self._metric_sentence("sleep_hours", devs["sleep_hours"], verb="was") if "sleep_hours" in devs else ""
+        flagged = [rf.ZONE_TITLES[z] for z, s in c["zones"].items() if s != "green"]
+        zone_note = (
+            f"All four monitoring zones look steady today."
+            if not flagged
+            else f"Areas needing gentle attention: {', '.join(flagged)}."
+        )
+        actions = []
         if c["active_alerts"]:
-            ex = self._need(he.explain_alert(aid))
-            lines.append(self._explain_text(ex))
-            lines += [self._explain_text(o) for o in ex.get("other_alerts", [])]
-        return "\n".join(lines), "health_engine.astronaut_card, health_engine.explain_alert, model_predictions, countermeasures"
+            actions.append(c["immediate_advice"][0]["advice_text"].split(".")[0])
+        else:
+            actions.append("Keep up hydration and today's exercise block on schedule")
+        body = (
+            f"{greet} Your mission day {c['mission_day']} check looks {status_phrase}. {zone_note} "
+            f"{hr_text} {sl_text}\n{self._actions_block(actions, warn_or_danger=warn_or_danger)}"
+        )
+        return body, "health_engine.astronaut_card, health_engine.earth_doctor_card, model_predictions, countermeasures"
 
     def _a_alerts(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         ex = self._need(he.explain_alert(aid))
+        doc = self._need(he.earth_doctor_card(aid, last_n_days=1))
+        warn_or_danger = self._is_warning_or_danger(aid)
+        greet = self._greet(aid, warm_empathy=warn_or_danger)
         if ex["area"] is None:
+            hr = doc["baseline_deviations"].get("heart_rate", {})
+            hr_line = self._metric_sentence("heart_rate", hr) if hr else "No indicators are flagged outside your baseline."
             return (
-                f"Mission day {ex['mission_day']}: {ex['what']} "
-                f"(a) Current vs your baseline: all indicators within personal band. "
-                f"(b) Why: {ex['why']} "
-                f"(c) How to avoid or fix it: {ex['how_to_fix']['advice_text']}",
+                f"{greet} On mission day {ex['mission_day']}, no alerts are active. {hr_line}\n"
+                f"(a) Current vs your baseline: all indicators remain within your personal band.\n"
+                f"(b) Why: no unusual shifts were detected.\n"
+                f"(c) How to avoid or fix it: {self._actions_block(['Maintain normal hydration, rest, and workout tracking'], False)}",
                 "health_engine.explain_alert, mission_telemetry, preflight_baseline",
             )
-        lines = [
-            f"Mission day {ex['mission_day']} - active alerts: {', '.join(ex['active_areas'])}.",
-            self._explain_text(ex),
-        ] + [self._explain_text(o) for o in ex.get("other_alerts", [])]
-        return "\n".join(lines), (
+        body = f"{greet} On mission day {ex['mission_day']}, let's review your active alert:\n{self._explain_text(ex)}"
+        if warn_or_danger:
+            body += "\nNext step: 1. Contact your flight surgeon to review these readings together."
+        return body, (
             "health_engine.explain_alert, mission_telemetry, preflight_baseline, "
             "countermeasures, model output"
         )
 
     def _a_cardio(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
-        return self._zone_answer(aid, "Cardiovascular")
+        return self._zone_answer(aid, "Cardiovascular", norm)
 
     def _a_bone_muscle(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
-        return self._zone_answer(aid, "Bone_Muscle")
+        return self._zone_answer(aid, "Bone_Muscle", norm)
 
     def _a_immune(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
-        return self._zone_answer(aid, "Immune")
+        return self._zone_answer(aid, "Immune", norm)
 
     def _a_glucose(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         card = self._need(he.earth_doctor_card(aid, last_n_days=1))
         imm = card["diagnostic_breakdown"]["Immune"]
-        gluc_items = [it for it in imm["indicators"] if it["indicator"] == "blood_sugar"]
-        lines = [f"Metabolic / Blood Glucose - mission day {card['mission_day']} - Immune/Metabolic zone: {imm['status'].upper()}"]
-        for it in gluc_items:
-            z = "n/a" if it.get("z") is None else f"{it['z']:+.2f} SD"
-            lines.append(
-                f"  blood_glucose_mg_dl (blood_sugar): {it['value']} {it['unit']} "
-                f"(your pre-flight baseline {it['baseline_mean']} +/- {it['baseline_std']}; {z}) "
-                f"[{it.get('ui_badge', 'Reference value')}]"
+        warn_or_danger = imm["status"] in ("yellow", "red") or self._is_warning_or_danger(aid)
+        dev = card["baseline_deviations"].get("blood_glucose_mg_dl")
+        if dev is None:
+            for it in imm["indicators"]:
+                if it["indicator"] in ("blood_glucose_mg_dl", "blood_sugar"):
+                    dev = it
+                    break
+        greet = self._greet(aid)
+        if dev is None:
+            msg = f"{greet} Your blood glucose measurement is missing for today."
+        else:
+            msg = (
+                f"{greet} {self._metric_sentence('blood_glucose_mg_dl', dev)} "
+                "The fasting reference range is 70-99 mg/dL."
             )
-        lines.append(
-            "  Clinical reference band (ADA Standards of Care 2024 [TERRESTRIAL_REFERENCE]): "
-            "normal fasting 70-99 mg/dL; hypoglycemia warning < 70 mg/dL; clinically significant hypoglycemia < 54 mg/dL; "
-            "elevated fasting >= 100 mg/dL (hyperglycemia danger >= 180 mg/dL)."
-        )
-        return "\n".join(lines), (
-            "mission_telemetry (blood_sugar / blood_glucose_mg_dl), preflight_baseline, "
+        steps = ["Re-check readings before meals or after quiet rest", "Keep balanced meals and hydration steady"]
+        return f"{msg}\n{self._actions_block(steps, warn_or_danger=warn_or_danger)}", (
+            "mission_telemetry (blood_glucose_mg_dl), preflight_baseline, "
             "07_health_indicators_schema.json (ADA 2024)"
         )
 
     def _a_sleep_psych(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
-        return self._zone_answer(aid, "Sleep_Brain")
+        is_mood_support = bool(
+            re.search(
+                r"\b(mood|mental health|stressed|relax|lonely|loneliness|homesick|overwhelmed|anxious|down|sad|isolated)\b",
+                norm,
+            )
+        )
+        if not is_mood_support:
+            return self._zone_answer(aid, "Sleep_Brain", norm)
+
+        card = self._need(he.earth_doctor_card(aid, last_n_days=1))
+        p = self._need(he.get_profile(aid))["profile"]
+        devs = card.get("baseline_deviations") or {}
+        warn_or_danger = self._is_warning_or_danger(aid)
+        fn = self._first_name(aid)
+
+        mood_dev = devs.get("mood")
+        sleep_dev = devs.get("sleep_hours")
+        intro = (
+            f"That sounds really heavy, {fn} — feeling that way during a mission makes complete sense, so let's check in together."
+            if fn
+            else "That sounds really heavy — feeling that way during a mission makes complete sense, so let's check in together."
+        )
+        nums = " ".join(
+            s for s in (
+                self._metric_sentence("mood", mood_dev) if mood_dev else "",
+                self._metric_sentence("sleep_hours", sleep_dev, verb="was") if sleep_dev else "",
+            ) if s
+        )
+        step = (
+            f"One small step: 1. Take two quiet minutes for slow breathing, listen to your song ({p['song']}), "
+            "or schedule a call with family or extra rest — support from your crew and flight surgeon is always available."
+        )
+        if warn_or_danger:
+            step += " Please also contact your flight surgeon so you don't carry this alone."
+        return f"{intro} {nums}\n{step}", "mission_telemetry, preflight_baseline, astronaut_profile, countermeasures"
 
     def _a_todo(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         t = self._need(he.get_todo(aid))
-        lines = [f"To-Do list for mission day {t['mission_day']}:"]
-        for it in t["items"]:
-            lines.append(f"  [{'x' if it['done'] else ' '}] {it['task']} - {it['minutes']} min recorded")
-        lines.append(
-            "  Countermeasure guidance: Complete daily ARED resistive exercise + treadmill/cycle cardio "
-            "(2.5 h/day block, 6 days/week per NASA-STD-3001) to mitigate microgravity bone and muscle loss."
-        )
-        return "\n".join(lines), "mission_telemetry (To-Do columns), countermeasures, health_engine.get_todo"
+        greet = self._greet(aid)
+        open_items = [it["task"] for it in t["items"] if not it["done"]]
+        done_mins = sum(int(it.get("minutes") or 0) for it in t["items"])
+        warn_or_danger = self._is_warning_or_danger(aid)
+        if open_items:
+            summary = f"{greet} On mission day {t['mission_day']}, you have logged {done_mins} min and have {len(open_items)} item(s) left: {', '.join(open_items)}."
+            actions = [f"Complete {open_items[0]}", "Hydrate afterward and stretch"]
+        else:
+            summary = f"{greet} Great work — all exercise checklist tasks for mission day {t['mission_day']} are complete ({done_mins} min logged)."
+            actions = ["Prioritize rest and recovery nutrition"]
+        return f"{summary}\n{self._actions_block(actions, warn_or_danger=warn_or_danger)}", "mission_telemetry (To-Do columns), countermeasures, health_engine.get_todo"
 
     def _a_profile(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         p = self._need(he.get_profile(aid))["profile"]
+        greet = self._greet(aid)
         hits = [col for pat, col in PROFILE_KEYS if re.search(pat, norm)]
         if hits:
-            body = "; ".join(f"{col}: {p[col]}" for col in hits)
-            return f"From your profile record - {body}.", "astronaut_profile"
-        keys = [
-            "name", "mission_role", "nationality", "age", "gender",
-            "weight_kg", "height_cm", "blood_type", "allergies",
-        ]
-        return ("Your profile record - " + "; ".join(f"{k}: {p[k]}" for k in keys) + "."), "astronaut_profile"
+            body = "; ".join(f"{col.replace('_', ' ')}: {p[col]}" for col in hits[:4])
+            return f"{greet} On your mission profile — {body}.", "astronaut_profile"
+        summary = (
+            f"role {p['mission_role']}, blood type {p['blood_type']}, allergies {p['allergies']}, "
+            f"age {p['age']}, weight {p['weight_kg']} kg, height {p['height_cm']} cm."
+        )
+        return f"{greet} From your profile on record: {summary}", "astronaut_profile"
 
     def _a_baseline(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         b = self._need(he.get_profile(aid))["baseline"]
+        greet = self._greet(aid)
         zone_for = [
             ("Cardiovascular", r"heart|pulse|blood pressure|systolic|diastolic|oxygen|spo2"),
             ("Sleep_Brain", r"sleep|mood|relax|mental|game|train"),
             ("Immune", r"immun|hormone|cortisol|temperature|blood glucose|sugar"),
             ("Bone_Muscle", r"bone|muscle|cardio|resistance|activity"),
         ]
-        names = [n for z, pat in zone_for if re.search(pat, norm) for n in rf.ZONES[z]] or rf.CONTINUOUS
-        lines = ["Your personal pre-flight baseline (mean +/- standard deviation over 30 pre-flight days):"]
-        for n in dict.fromkeys(names):
-            lines.append(f"  {n}: {b[n + '_mean']:.2f} +/- {b[n + '_std']:.2f} {rf.IND[n]['unit']}")
-        return "\n".join(lines), "preflight_baseline"
+        names = [n for z, pat in zone_for if re.search(pat, norm) for n in rf.ZONES[z]]
+        if not names:
+            names = ["heart_rate", "systolic_bp", "diastolic_bp", "oxygen_saturation", "temperature", "sleep_hours", "mood"]
+        parts = []
+        for n in dict.fromkeys(names[:5]):
+            label, unit = self._FRIENDLY_LABELS.get(n, (n.replace("_", " "), rf.IND[n]["unit"]))
+            parts.append(f"{label} {self._fmt_num(b[n + '_mean'])} {unit}".strip())
+        return f"{greet} Your pre-mission 30-day baselines: {', '.join(parts)}.", "preflight_baseline"
 
     def _a_calming(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         p = self._need(he.get_profile(aid))["profile"]
+        greet = self._greet(aid, warm_empathy=True)
         if re.search(r"photo|picture|family", norm):
-            act, f = "show_family_photo", p["family_photo"]
+            act, f = "family photo", p["family_photo"]
         else:
-            act, f = "play_song", p["song"]
-        return (
-            f"Calming action triggered: {act} -> {f}. (Other option: "
-            f"{'song ' + p['song'] if act == 'show_family_photo' else 'family photo ' + p['family_photo']}.) "
-            "Guided box-breathing (4s inhale, 4s hold, 4s exhale) and scheduled crew/family contact are recommended.",
-            "astronaut_profile (calming preferences), countermeasures",
+            act, f = "calming song", p["song"]
+        step = (
+            f"{greet} Your {act} ({f}) is ready — support is always here for you.\n"
+            f"{self._actions_block(['Try 2 minutes of slow breathing while enjoying your media', 'Connect with crewmates or call family when you have a quiet window'])}"
         )
+        return step, "astronaut_profile (calming preferences), countermeasures"
 
     def _a_contact(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         p = self._need(he.get_profile(aid))["profile"]
-        return f"Your flight surgeon contact on record: {p['contact_flight_surgeon']}.", "astronaut_profile"
+        greet = self._greet(aid)
+        return (
+            f"{greet} You can contact your flight surgeon anytime at: {p['contact_flight_surgeon']}. Support is always on standby.",
+            "astronaut_profile",
+        )
 
     def _a_journey(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         p = self._need(he.get_profile(aid))["profile"]
         day = self._need(he.get_todo(aid))["mission_day"]
+        greet = self._greet(aid)
         return (
-            f"Journey record - vehicle: {p['type_of_aircraft']}; destination: {p['destination_for_flight']}; "
-            f"estimated flight time: {p['estimated_time_for_flight_days']} days; latest recorded mission day: {day}.",
+            f"{greet} You are on mission day {day} aboard {p['type_of_aircraft']}, heading toward "
+            f"{p['destination_for_flight']} (estimated {p['estimated_time_for_flight_days']} days total).",
             "astronaut_profile, mission_telemetry",
         )
 
@@ -907,19 +1166,17 @@ class OfflineChatbot:
         r = self._need(he.mission_replay(aid, ts.isoformat()))
         sp = r["stored_prediction"]
         tel = r["telemetry"]
-        keys = [
-            "systolic_bp", "diastolic_bp", "heart_rate",
-            "oxygen_saturation", "temperature", "blood_sugar", "sleep_hours", "mood",
-        ]
-        pred = "no stored prediction" if sp is None else (
-            f"model class {sp['predicted_class']} (p={sp['class_probabilities'][sp['predicted_class']]:.2f})"
-        )
+        b = self._need(he.get_profile(aid))["baseline"]
+        greet = self._greet(aid)
+        pred = "normal" if sp is None else sp["predicted_class"].replace("_", " ").lower()
+        hr_val = tel.get("heart_rate")
+        hr_s = f"Heart rate was {self._fmt_num(hr_val)} bpm ({self._pct_phrase(hr_val, b.get('heart_rate_mean'), 'bpm')})." if hr_val is not None else ""
+        sl_val = tel.get("sleep_hours")
+        sl_s = f"Sleep was {self._fmt_num(sl_val)} h." if sl_val is not None else ""
+        warn_or_danger = sp is not None and sp["predicted_class"] in ("Health_Warning", "Medical_Danger_Alert")
+        extra = " Contact your flight surgeon if you'd like to review that day together." if warn_or_danger else ""
         return (
-            f"Replay of mission day {r['mission_day']} ({r['matched_timestamp']}): {pred}. Readings: "
-            + ", ".join(f"{k}={tel[k]}" for k in keys if k in tel)
-            + ". Zones then: "
-            + ", ".join(f"{z}={s}" for z, s in r["zones_at_that_time"].items())
-            + ".",
+            f"{greet} On mission day {r['mission_day']}, your status was {pred}. {hr_s} {sl_s}{extra}",
             "health_engine.mission_replay, mission_telemetry, model_predictions",
         )
 
@@ -934,38 +1191,30 @@ class OfflineChatbot:
         sign = -1.0 if re.search(r"\b(less|fewer|reduce|cut|decrease|lower|worse|drops?)\b", norm) else 1.0
         r = self._need(he.what_if(aid, {ind: sign * amount}))
         ch = r["applied_changes"][ind]
-        probs = "; ".join(
-            f"{c}: {r['before']['class_probabilities'][c]:.2f} -> {r['after']['class_probabilities'][c]:.2f}"
-            for c in rf.CLASSES
-        )
+        greet = self._greet(aid)
+        label, unit = self._FRIENDLY_LABELS.get(ind, (ind, ch["unit"]))
         return (
-            f"What-if on mission day {r['mission_day']}: {ind} {ch['before']} -> {ch['after']} {ch['unit']}. "
-            f"Model class {r['before']['predicted_class']} -> {r['after']['predicted_class']}. "
-            f"Class probabilities: {probs}. {r['note']}"
-        ), "health_engine.what_if, live model output, mission_telemetry"
+            f"{greet} If your {label} shifts from {self._fmt_num(ch['before'])} to {self._fmt_num(ch['after'])} {unit}, "
+            f"the simulated status moves from {r['before']['predicted_class'].replace('_', ' ')} "
+            f"to {r['after']['predicted_class'].replace('_', ' ')}. {self._actions_block(['Use small steady habits to protect your baseline'])}",
+            "health_engine.what_if, live model output, mission_telemetry",
+        )
 
     def _a_correlation(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
         r = self._need(he.mood_training_correlation(aid))
         w = r["within_astronaut"][0]
-        all_r = self._need(he.mood_training_correlation())
-        rm = all_r["repeated_measures_and_mixed_effects"]
+        greet = self._greet(aid)
         return (
-            f"Mood vs daily training hours — within your own records (n={w['n']} days): "
-            f"Pearson r={w['pearson_r']} (95% CI [{w['ci_95_low']}, {w['ci_95_high']}], p={w['pearson_p']}), "
-            f"Spearman rho={w['spearman_rho']} (p={w['spearman_p']}). "
-            f"Crew-wide within-astronaut repeated-measures correlation (n={rm['n_observations']}, df={rm['df']}): "
-            f"r_rm={rm['rm_corr_r']} (95% CI [{rm['ci_95_low']}, {rm['ci_95_high']}], p={rm['p_value']}), "
-            f"mixed-effects slope={rm['mixed_effects_slope']} (95% CI {rm['mixed_effects_slope_ci_95']}). {r['note']}",
+            f"{greet} Across {w['n']} of your mission days, daily training hours and mood show correlation r={w['pearson_r']} "
+            f"(p={w['pearson_p']}). Keeping a steady workout routine tends to support steadier daily mood.",
             "mission_telemetry, health_engine.mood_training_correlation",
         )
 
     def _a_sources(self, aid: str, q: str, norm: str) -> Tuple[str, str]:
+        greet = self._greet(aid)
         return (
-            "I am not a doctor and this is not a medical device. I answer only from three places: (1) your profile, "
-            "pre-flight baseline and telemetry in the SQLite database, (2) the live output of the trained model, and "
-            "(3) the countermeasures table built from the challenge resources and NASA-STD-3001 / OCHMO / HRP standards. "
-            "All telemetry in this prototype is simulated, and reviewer_status remains empty until a physician review CSV "
-            "is imported via review/record_review.py.",
+            f"{greet} I'm your support companion, not a doctor. My answers come only from your mission profile, "
+            "pre-mission baselines, daily telemetry, our trained model, and verified NASA-STD-3001 / OCHMO / HRP countermeasures.",
             "data_provenance, countermeasures, model " + rf.MODEL_VERSION,
         )
 

@@ -115,24 +115,54 @@ const MH = (() => {
     ["What is one thing that could make the rest of your day better?","text"]
   ];
   const api = { songs: [], photos: [], log: [] };
-  let opt = {}, box, timer, player, chartInst;
+  let opt = {}, box, timer, chartInst, editingToday = false;
   const $ = s => box.querySelector(s);
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const safeUrl = u => (window.VV_SHELL ? window.VV_SHELL.safeUrl(u) : "");
 
   api.mount = (sel, o) => {
-    opt = Object.assign({ role: "astronaut", astronauts: [] }, opt, o || {});
+    opt = Object.assign({ role: "astronaut", astronauts: [], selectedId: "", csrfToken: "", todayCheckin: null, lowStreak: false }, opt, o || {});
     if (o && o.entries) api.log = o.entries;
     if (o && o.songs) api.songs = o.songs;
     if (o && o.photos) api.photos = o.photos.map(p => typeof p === "string" ? { url: p, tag: "happy" } : p);
     box = document.querySelector(sel);
     clearInterval(timer);
     if (chartInst) { chartInst.destroy(); chartInst = null; }
+    editingToday = false;
     opt.role === "doctor" ? doctor() : astronaut();
   };
 
+  function prefillForm(ans) {
+    if (!ans) return;
+    [0, 2, 4, 6, 8].forEach(i => {
+      const el = box.querySelector(`input[type=range][data-q="${i}"]`);
+      if (el && ans[i] != null) {
+        el.value = String(ans[i]);
+        paint(el);
+        const lbl = $("#v" + i);
+        if (lbl) lbl.textContent = el.value + "/5";
+      }
+    });
+    [1, 3, 5].forEach(i => {
+      if (!ans[i]) return;
+      const rad = box.querySelector(`input[name="q${i}"][value="${CSS.escape(String(ans[i]))}"]`);
+      if (rad) rad.checked = true;
+    });
+    if (ans["3"] === "Yes" || ans["3"] === "Something else") {
+      $("#smile").hidden = false;
+      const t = $('[data-q="3t"]');
+      if (t && ans["3t"]) t.value = ans["3t"];
+    }
+    [7, 9].forEach(i => {
+      const ta = box.querySelector(`textarea[data-q="${i}"]`);
+      if (ta && ans[i] != null) ta.value = ans[i];
+    });
+  }
+
   function astronaut() {
-    let h = `<h2>Daily check-in</h2><p class="sub">Answer 10 quick questions. It takes one minute.</p><div class="card">`;
+    const todayEntry = opt.todayCheckin;
+    let h = `<h2>Daily check-in</h2><p class="sub">Answer 10 quick questions. It takes one minute.</p>`;
+    h += `<div class="card" id="mhFormCard" ${todayEntry && !editingToday ? "hidden" : ""}>`;
     Q.forEach(([q, t, a, b], i) => {
       h += `<div class="q"><p>${i + 1}. ${q}</p>`;
       if (t === "scale") {
@@ -152,11 +182,12 @@ const MH = (() => {
       }
       h += `</div>`;
     });
-    h += `<div class="err-inline" id="mhErr" hidden></div><button class="btn" id="mhSave" type="button">Save answers</button></div><div id="rec"></div>
-      <div class="card"><h3>Email to someone</h3><p class="sub">Write to someone you love. It will send securely or open your email app.</p>
+    h += `<div class="err-inline" id="mhErr" hidden></div><button class="btn" id="mhSave" type="button">${todayEntry ? "Update today's answers" : "Save answers"}</button></div><div id="rec"></div>
+      <div class="card"><h3>Email to someone</h3><p class="sub">Write to someone you love. Sent via server SMTP when configured, or opens your email app.</p>
       <label class="l">To</label><input type="email" id="eT" placeholder="name@example.com">
       <label class="l">Subject</label><input type="text" id="eS">
       <label class="l">Message</label><textarea id="eM" rows="4"></textarea>
+      <div class="err-inline" id="mhMailStatus" hidden></div>
       <button class="btn" id="mhMail" type="button">Send email</button></div>`;
     box.innerHTML = h;
     box.querySelectorAll("input[type=range]").forEach(r => {
@@ -172,6 +203,11 @@ const MH = (() => {
     });
     $("#mhSave").onclick = save;
     $("#mhMail").onclick = mail;
+
+    if (todayEntry) {
+      prefillForm(todayEntry.answers);
+      recs(todayEntry.score, todayEntry.answers, true, todayEntry.recommended_tag);
+    }
   }
 
   function paint(r) {
@@ -179,7 +215,7 @@ const MH = (() => {
     r.style.background = `linear-gradient(90deg,var(--green) ${p}%,var(--track) ${p}%)`;
   }
 
-  function save() {
+  async function save() {
     const errEl = $("#mhErr");
     errEl.hidden = true;
     const a = {};
@@ -194,31 +230,58 @@ const MH = (() => {
       }
     }
 
-    const sc = [0, 2, 4, 6, 8].map(i => +a[i]);
-    let s = sc.reduce((x, y) => x + y, 0) / sc.length;
-    if (a[5] === "Often") s -= 0.7;
-    if (a[5] === "Never") s += 0.2;
-    if (a[1] === "Sad" || a[1] === "Stressed") s -= 0.3;
-    s = Math.max(1, Math.min(5, s));
-
-    const entry = { time: new Date().toLocaleString(), score: +s.toFixed(1), answers: a };
-    api.log.unshift(entry);
-    if (opt.onSubmit) opt.onSubmit(entry);
-    if (s < 2.5 && opt.onLowMood) opt.onLowMood(entry);
-    recs(s, a);
+    const saveBtn = $("#mhSave");
+    const isEdit = Boolean(opt.todayCheckin);
+    const aid = opt.astronautId;
+    if (!aid) {
+      errEl.textContent = "Astronaut profile session unavailable.";
+      errEl.hidden = false;
+      return;
+    }
+    saveBtn.disabled = true;
+    try {
+      const url = isEdit
+        ? "/api/mental/" + encodeURIComponent(aid) + "/checkins/today"
+        : "/api/mental/" + encodeURIComponent(aid) + "/checkins";
+      const res = await fetch(url, {
+        method: isEdit ? "PUT" : "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": opt.csrfToken || ""
+        },
+        body: JSON.stringify({ answers: a })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        errEl.textContent = body.detail || "Unable to save check-in.";
+        errEl.hidden = false;
+        return;
+      }
+      opt.todayCheckin = body.entry;
+      if (body.songs) api.songs = body.songs;
+      if (body.photos) api.photos = body.photos;
+      api.log.unshift(body.entry);
+      const formCard = $("#mhFormCard");
+      if (formCard) formCard.hidden = true;
+      editingToday = false;
+      recs(body.entry.score, body.entry.answers, true, body.entry.recommended_tag);
+    } finally {
+      saveBtn.disabled = false;
+    }
   }
 
-  function recs(s, a) {
-    let tag = s < 2.7 ? "comfort" : s < 3.8 ? "happy" : "energy";
-    if (["Sad", "Stressed", "Tired"].includes(a[1]) || a[5] === "Often") tag = "comfort";
+  function recs(s, a, showEditBtn, serverTag) {
+    let tag = serverTag || (s < 2.7 ? "comfort" : s < 3.8 ? "happy" : "energy");
+    if (!serverTag && (["Sad", "Stressed", "Tired"].includes(a[1]) || a[5] === "Often")) tag = "comfort";
     const pick = api.songs.filter(x => x.tag === tag);
     const song = (pick.length ? pick : api.songs)[0];
     const el = $("#rec");
     clearInterval(timer);
 
-    let h = `<div class="card"><h3>Your mood today: ${s.toFixed(1)} / 5</h3>`;
-    if (s < 2.7) h += `<p class="note">It looks like a hard day. Take a breath. Here is something for you.</p>`;
-    h += song ? `<p><b>Your song:</b> ${esc(song.title)}</p>` : `<p class="sub">Add songs to your profile and we will pick one matched to your mood.</p>`;
+    let h = `<div class="card"><h3>Your mood today: ${Number(s).toFixed(1)} / 5</h3>`;
+    if (s < 2.7) h += `<p class="note">It looks like a hard day. Take a breath. Here is something matched (${esc(tag)}) for you.</p>`;
+    h += song ? `<p><b>Your song (${esc(song.tag)}):</b> ${esc(song.title)}</p>` : `<p class="sub">Add songs to your profile and we will pick one matched to your mood.</p>`;
     const validSongUrl = song ? safeUrl(song.url) : "";
     if (song && song.kind === "audio" && validSongUrl) h += `<audio controls src="${esc(validSongUrl)}"></audio>`;
     if (song && song.kind === "link" && validSongUrl) h += `<p><a class="btn ghost" style="text-decoration:none" href="${esc(validSongUrl)}" target="_blank" rel="noopener">Open the song</a></p>`;
@@ -226,7 +289,18 @@ const MH = (() => {
     const pp = api.photos.filter(x => x.tag === tag);
     const pl = (pp.length ? pp : api.photos).map(x => safeUrl(x.url)).filter(Boolean);
     h += pl.length ? `<img class="show" id="sh" src="${esc(pl[0])}" alt="Preferred photo">` : `<p class="sub">Add photos to your profile and they will show here.</p>`;
+    if (showEditBtn) {
+      h += `<div style="margin-top:16px"><button type="button" class="btn ghost" id="mhEditTodayBtn">Edit today's answers</button></div>`;
+    }
     el.innerHTML = h + `</div>`;
+    const editBtn = $("#mhEditTodayBtn");
+    if (editBtn) {
+      editBtn.onclick = () => {
+        editingToday = true;
+        const fc = $("#mhFormCard");
+        if (fc) { fc.hidden = false; fc.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      };
+    }
     if (pl.length > 1) {
       let i = 0;
       timer = setInterval(() => {
@@ -236,42 +310,108 @@ const MH = (() => {
         im.src = pl[i];
       }, 4000);
     }
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  function mail() {
+  async function mail() {
     const t = $("#eT").value.trim();
+    const statusEl = $("#mhMailStatus");
+    if (statusEl) statusEl.hidden = true;
     if (!t) {
-      const errEl = $("#mhErr");
-      if (errEl) { errEl.textContent = "Enter a recipient email address."; errEl.hidden = false; }
+      if (statusEl) {
+        statusEl.style.borderColor = "rgba(255,122,107,.5)";
+        statusEl.style.background = "rgba(255,122,107,.12)";
+        statusEl.style.color = "#ffd2cc";
+        statusEl.textContent = "Enter a valid recipient email address.";
+        statusEl.hidden = false;
+      }
       return;
     }
-    location.href = "mailto:" + encodeURIComponent(t) + "?subject=" + encodeURIComponent($("#eS").value) + "&body=" + encodeURIComponent($("#eM").value);
+    const res = await fetch("/api/mental/email", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": opt.csrfToken || ""
+      },
+      body: JSON.stringify({ to_email: t, subject: $("#eS").value, body: $("#eM").value })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (statusEl) {
+        statusEl.style.borderColor = "rgba(255,122,107,.5)";
+        statusEl.style.background = "rgba(255,122,107,.12)";
+        statusEl.style.color = "#ffd2cc";
+        statusEl.textContent = body.detail || "Unable to prepare email.";
+        statusEl.hidden = false;
+      }
+      return;
+    }
+    if (body.mode === "mailto" && body.mailto_url) {
+      if (statusEl) {
+        statusEl.style.borderColor = "rgba(168,224,122,.5)";
+        statusEl.style.background = "rgba(168,224,122,.1)";
+        statusEl.style.color = "#e4f7c8";
+        statusEl.textContent = "Opening your email app (rate limit verified).";
+        statusEl.hidden = false;
+      }
+      window.location.href = body.mailto_url;
+    } else if (statusEl) {
+      statusEl.style.borderColor = "rgba(168,224,122,.5)";
+      statusEl.style.background = "rgba(168,224,122,.1)";
+      statusEl.style.color = "#e4f7c8";
+      statusEl.textContent = body.message || "Email sent successfully.";
+      statusEl.hidden = false;
+    }
   }
 
   function doctor() {
-    const lowStreak = api.log.slice(0, 3).length === 3 && api.log.slice(0, 3).every(e => Number(e.score) < 2.5);
-    const astOpts = (opt.astronauts && opt.astronauts.length ? opt.astronauts : [{ id: "", label: "Approved Astronaut (Phase 2/3 demo)" }])
-      .map(a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join("");
+    if (!opt.astronauts || !opt.astronauts.length) {
+      box.innerHTML =
+        `<h2>Mental health results</h2>` +
+        `<div class="card"><p class="sub" style="margin:0">No approved astronauts linked yet. Visit your <a href="/profile.html" style="color:var(--green)">Profile</a> page to request access.</p></div>`;
+      return;
+    }
+    const lowStreak = Boolean(opt.lowStreak) || (api.log.slice(0, 3).length === 3 && api.log.slice(0, 3).every(e => Number(e.score) < 2.5));
+    const astOpts = opt.astronauts
+      .map(a => `<option value="${esc(a.id)}" ${a.id === opt.selectedId ? "selected" : ""}>${esc(a.label)}</option>`)
+      .join("");
     box.innerHTML =
       `<h2>Mental health results</h2>` +
       `<div class="card"><label class="l" for="mhAstSel">Approved astronaut</label><select id="mhAstSel">${astOpts}</select></div>` +
-      (lowStreak ? `<div class="card warn-card"><strong>Sustained Low-Mood Notice:</strong> Last 3 check-ins are below 2.5 / 5. Consider flight-surgeon follow-up.</div>` : "") +
-      `<div class="card"><h3>Mood score trend (1–5)</h3><p class="sub">Reference line marks the 2.5 / 5 support threshold.</p><div class="chart-box"><canvas id="mhTrendChart"></canvas></div></div>` +
+      (lowStreak ? `<div class="card warn-card"><strong>Low mood for 3+ days:</strong> Last 3 check-ins are below 2.5 / 5. Consider flight-surgeon follow-up.</div>` : "") +
+      `<div class="card"><h3>Mood score trend (1–5)</h3><p class="sub">Reference line marks the 2.5 / 5 support threshold.</p>${api.log.length ? '<div class="chart-box"><canvas id="mhTrendChart"></canvas></div>' : '<p class="sub" style="margin:0">No daily check-ins submitted yet for this astronaut.</p>'}</div>` +
       `<div class="card">${results()}</div>`;
 
+    const selEl = $("#mhAstSel");
+    if (selEl && opt.onSelectAstronaut) {
+      selEl.addEventListener("change", () => opt.onSelectAstronaut(selEl.value));
+    }
+
     const canvas = document.getElementById("mhTrendChart");
-    if (canvas && typeof Chart !== "undefined") {
-      const rows = api.log.length ? api.log.slice().reverse() : [{ time: "Day 1", score: 3.8 }, { time: "Day 2", score: 3.4 }, { time: "Day 3", score: 3.1 }];
+    if (canvas && typeof Chart !== "undefined" && api.log.length) {
+      const rows = api.log.slice().reverse();
       const labels = rows.map(r => r.time);
       const scores = rows.map(r => Number(r.score));
+      const lowZonePlugin = {
+        id: "lowZoneShade",
+        beforeDatasetsDraw(chart) {
+          const { ctx, chartArea, scales } = chart;
+          if (!chartArea || !scales.y) return;
+          const yTop = scales.y.getPixelForValue(2.5);
+          const yBot = scales.y.getPixelForValue(1.0);
+          ctx.save();
+          ctx.fillStyle = "rgba(255,122,107,0.08)";
+          ctx.fillRect(chartArea.left, yTop, chartArea.right - chartArea.left, Math.max(0, yBot - yTop));
+          ctx.restore();
+        }
+      };
       chartInst = new Chart(canvas, {
         type: "line",
         data: {
           labels,
           datasets: [
             { label: "Mood Score (1-5)", data: scores, borderColor: "#a8e07a", backgroundColor: "rgba(168,224,122,0.12)", tension: 0.3, fill: true },
-            { label: "Low-Mood Threshold (2.5)", data: labels.map(() => 2.5), borderColor: "#f5c451", borderDash: [6, 6], pointRadius: 0, fill: false }
+            { label: "Low-Mood Threshold (2.5)", data: labels.map(() => 2.5), borderColor: "#ff7a6b", borderDash: [6, 6], pointRadius: 0, fill: false }
           ]
         },
         options: {
@@ -282,29 +422,72 @@ const MH = (() => {
             x: { ticks: { color: "#9aa6ab" }, grid: { display: false } }
           },
           plugins: { legend: { labels: { color: "#d9dde0" } } }
-        }
+        },
+        plugins: [lowZonePlugin]
       });
     }
   }
 
   function results() {
-    if (!api.log.length) return "<p class='sub'>No check-ins yet.</p>";
+    if (!api.log.length) return "<p class='sub'>No check-ins recorded yet for this astronaut.</p>";
     const L = [["How are you feeling",0],["Emotion",1],["Positive day",2],["Smiled",3],["What made them smile","3t"],["Comfortable",4],["Overwhelmed",5],["Connected",6],["On their mind",7],["Motivated",8],["Would improve the day",9]];
-    return api.log.map(e => `<h3>${esc(e.time)} – mood ${e.score}/5</h3><div class="scroll"><table>${L.map(([n,i]) => `<tr><th>${n}</th><td>${esc((e.answers && e.answers[i]) || "-")}</td></tr>`).join("")}</table></div>`).join("");
+    return api.log.map(e => `<h3>${esc(e.time)} – mood ${Number(e.score).toFixed(1)}/5</h3><div class="scroll"><table>${L.map(([n,i]) => `<tr><th>${n}</th><td>${esc((e.answers && e.answers[i]) || "-")}</td></tr>`).join("")}</table></div>`).join("");
   }
 
   return api;
 })();
 
-fetch("/api/auth/me", { credentials: "same-origin" })
-  .then(r => (r.ok ? r.json() : null))
-  .then(data => {
-    const serverRole = data && data.authenticated && data.role === "doctor" ? "doctor" : "astronaut";
-    MH.mount("#mh", { role: serverRole, songs: [], photos: [], entries: [] });
-  })
-  .catch(() => {
-    MH.mount("#mh", { role: "astronaut", songs: [], photos: [], entries: [] });
+async function loadDoctorMentalFor(approvedList, selectedId, csrfToken) {
+  const aid = selectedId || (approvedList[0] && approvedList[0].id) || "";
+  if (!aid) {
+    MH.mount("#mh", { role: "doctor", astronauts: [], csrfToken });
+    return;
+  }
+  const r = await fetch("/api/mental/" + encodeURIComponent(aid) + "/checkins", { credentials: "same-origin" });
+  const body = r.ok ? await r.json() : { entries: [], low_streak: false };
+  MH.mount("#mh", {
+    role: "doctor",
+    astronauts: approvedList,
+    selectedId: aid,
+    csrfToken,
+    lowStreak: Boolean(body.low_streak),
+    entries: body.entries || [],
+    onSelectAstronaut: nextAid => loadDoctorMentalFor(approvedList, nextAid, csrfToken)
   });
+}
+
+(async function initMentalPage() {
+  if (!window.VV_SHELL || !window.VV_SHELL.getSession) return;
+  const sess = await window.VV_SHELL.getSession();
+  if (!sess || !sess.authenticated) {
+    if (sess && sess.backendAvailable) {
+      window.location.href = "/login.html";
+    }
+    return;
+  }
+  const csrf = sess.csrf_token || "";
+  if (sess.role === "astronaut" && sess.user && sess.user.astronaut_id) {
+    const aid = sess.user.astronaut_id;
+    const r = await fetch("/api/mental/" + encodeURIComponent(aid) + "/checkins", { credentials: "same-origin" });
+    const body = r.ok ? await r.json() : { entries: [], songs: [], photos: [], today_checkin: null };
+    MH.mount("#mh", {
+      role: "astronaut",
+      astronautId: aid,
+      csrfToken: csrf,
+      todayCheckin: body.today_checkin || null,
+      entries: body.entries || [],
+      songs: body.songs || [],
+      photos: body.photos || []
+    });
+    return;
+  }
+  if (sess.role === "doctor") {
+    const dr = await fetch("/api/doctor/astronauts", { credentials: "same-origin" });
+    const dbody = dr.ok ? await dr.json() : { approved: [] };
+    const list = (dbody.approved || []).map(a => ({ id: a.id, label: a.id + " — " + a.name }));
+    await loadDoctorMentalFor(list, list[0] ? list[0].id : "", csrf);
+  }
+})();
 </script>
 </body>
 </html>

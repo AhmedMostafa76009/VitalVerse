@@ -186,6 +186,15 @@ CREATE TABLE IF NOT EXISTS email_rate_limits (
     sent_at TEXT NOT NULL,
     status TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS online_chat_rate_limits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rate_key TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_online_chat_rate_key_time
+    ON online_chat_rate_limits(rate_key, created_at);
 """
 
 
@@ -196,6 +205,9 @@ def init_web_tables(con: sqlite3.Connection | None = None) -> None:
         con = open_connection()
     try:
         con.executescript(WEB_SCHEMA_SQL)
+        cols = {str(r["name"]) for r in con.execute("PRAGMA table_info(astronaut_profile)").fetchall()}
+        if "profile_avatar" not in cols:
+            con.execute("ALTER TABLE astronaut_profile ADD COLUMN profile_avatar TEXT")
         con.commit()
     finally:
         if own_con:

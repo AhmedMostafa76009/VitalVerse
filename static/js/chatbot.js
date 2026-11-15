@@ -1,7 +1,8 @@
-/* Vitalverse Offline AI Chatbot UI wiring (POST /api/chat) */
+/* Vitalverse Hybrid AI Chatbot UI wiring (On-board + Online via /api/chat) */
 (function () {
   'use strict';
 
+  var ENGINE_STORAGE_KEY = 'vv_chat_engine';
   var BOT_SVG =
     '<svg viewBox="0 0 36 22" fill="none" stroke="#a8e07a" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
       '<path d="M1 11h7l3-8 5 16 4-12 3 4h12"/>' +
@@ -15,15 +16,121 @@
   var roleBadge = document.getElementById('chatRoleBadge');
   var astronautSelect = document.getElementById('chatAstronautSelect');
   var promptChips = document.getElementById('promptChips');
+  var engineOfflineBtn = document.getElementById('engineOfflineBtn');
+  var engineOnlineBtn = document.getElementById('engineOnlineBtn');
+  var engineHint = document.getElementById('engineHint');
+  var onlinePrivacyNotice = document.getElementById('onlinePrivacyNotice');
 
   var state = {
     session: null,
     selectedAstronautId: null,
+    engine: 'offline',
+    onlineStatus: {
+      available: false,
+      active_provider: 'gemini',
+      provider_label: 'Gemini',
+      service_name: 'Google Gemini',
+      button_label: 'Online',
+      unavailable_hint: 'Online assistant unavailable',
+      privacy_notice:
+        'Online mode sends your question and a short summary of your health data to an external AI service (Google Gemini).'
+    },
     busy: false
   };
 
   function esc(str) {
     return window.VV_SHELL ? window.VV_SHELL.esc(str) : String(str || '');
+  }
+
+  function readStoredEngine() {
+    try {
+      return window.sessionStorage ? window.sessionStorage.getItem(ENGINE_STORAGE_KEY) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeStoredEngine(eng) {
+    try {
+      if (window.sessionStorage) window.sessionStorage.setItem(ENGINE_STORAGE_KEY, eng);
+    } catch (_) {}
+  }
+
+  function applyEngineUi() {
+    var st = state.onlineStatus || {};
+    var onlineAvailable = Boolean(st.available);
+    if (engineOnlineBtn) {
+      engineOnlineBtn.textContent = st.button_label || 'Online';
+      engineOnlineBtn.disabled = !onlineAvailable;
+      engineOnlineBtn.setAttribute('aria-disabled', onlineAvailable ? 'false' : 'true');
+    }
+    if (engineHint) {
+      engineHint.textContent = st.unavailable_hint || 'Online assistant unavailable';
+      if (onlineAvailable) {
+        engineHint.setAttribute('hidden', '');
+      } else {
+        engineHint.removeAttribute('hidden');
+      }
+    }
+    if (!onlineAvailable && state.engine === 'online') {
+      state.engine = 'offline';
+      writeStoredEngine('offline');
+    }
+
+    var isOnline = state.engine === 'online' && onlineAvailable;
+    if (engineOfflineBtn) {
+      engineOfflineBtn.classList.toggle('active', !isOnline);
+      engineOfflineBtn.setAttribute('aria-pressed', !isOnline ? 'true' : 'false');
+    }
+    if (engineOnlineBtn) {
+      engineOnlineBtn.classList.toggle('active', isOnline);
+      engineOnlineBtn.setAttribute('aria-pressed', isOnline ? 'true' : 'false');
+    }
+    if (onlinePrivacyNotice) {
+      onlinePrivacyNotice.textContent =
+        st.privacy_notice ||
+        'Online mode sends your question and a short summary of your health data to an external AI service (' +
+          (st.service_name || 'Google Gemini') +
+          ').';
+      if (isOnline) {
+        onlinePrivacyNotice.removeAttribute('hidden');
+      } else {
+        onlinePrivacyNotice.setAttribute('hidden', '');
+      }
+    }
+  }
+
+  function setEngine(nextEngine) {
+    if (nextEngine === 'online' && !state.onlineStatus.available) {
+      state.engine = 'offline';
+      writeStoredEngine('offline');
+      applyEngineUi();
+      return;
+    }
+    state.engine = nextEngine === 'online' ? 'online' : 'offline';
+    writeStoredEngine(state.engine);
+    applyEngineUi();
+  }
+
+  function fetchOnlineStatus() {
+    return fetch('/api/chat/status', { credentials: 'same-origin' })
+      .then(function (res) {
+        return res.ok ? res.json() : null;
+      })
+      .then(function (data) {
+        if (data && typeof data === 'object') {
+          state.onlineStatus = data;
+          var saved = readStoredEngine();
+          if (saved === 'online' && data.available) {
+            state.engine = 'online';
+          }
+        }
+        applyEngineUi();
+      })
+      .catch(function () {
+        state.onlineStatus.available = false;
+        applyEngineUi();
+      });
   }
 
   function scrollToBottom() {
@@ -67,6 +174,10 @@
     var bubbleClass = 'vv-bubble vv-bubble--bot';
     var inner = '';
 
+    if (data && data.fallback_notice) {
+      inner += '<div class="vv-fallback-note">' + esc(data.fallback_notice) + '</div>';
+    }
+
     if (data && data.urgent_escalation) {
       bubbleClass += ' vv-urgent-card';
       var surgeon = data.flight_surgeon_contact || 'Ground Medical Control';
@@ -95,13 +206,18 @@
         '<div style="margin-top:12px;"><a class="btn" href="login.html" style="padding:8px 16px;font-size:12px;">Sign in to Vitalverse</a></div>';
     }
 
+    var engineLabel = (data && data.engine_label) || 'On-board';
+    var engineTagClass = 'vv-engine-tag' + (data && data.engine_used === 'online' ? ' vv-engine-tag--online' : '');
     var metaParts = [];
     if (data && data.astronaut_id) metaParts.push('Crew ' + esc(data.astronaut_id));
     if (data && data.intent) metaParts.push('Intent: ' + esc(data.intent));
     if (data && data.sources && data.sources !== 'none') metaParts.push('Source: ' + esc(data.sources));
-    if (metaParts.length) {
-      inner += '<div class="vv-bubble-meta"><span>' + metaParts.join(' · ') + '</span></div>';
-    }
+
+    inner +=
+      '<div class="vv-bubble-meta">' +
+        '<span class="' + engineTagClass + '">' + esc(engineLabel) + '</span>' +
+        (metaParts.length ? '<span>' + metaParts.join(' · ') + '</span>' : '') +
+      '</div>';
 
     row.innerHTML =
       '<div class="vv-bot-avatar" aria-hidden="true">' + BOT_SVG + '</div>' +
@@ -122,7 +238,7 @@
   function renderWelcome() {
     chatLog.innerHTML = '';
     var greeting =
-      'Hello! I am your offline Vitalverse health assistant. Ask about your telemetry, alerts, pre-flight baselines, or orbital countermeasures.';
+      'Hello! I am your Vitalverse health assistant. Ask about your heart rate, sleep, mood, alerts, pre-flight baselines, or orbital countermeasures.';
     if (state.session && state.session.authenticated && state.session.role === 'doctor') {
       greeting =
         'Doctor session active. Select an approved crew member above and ask about their 180-day telemetry, baseline comparisons, or alerts.';
@@ -132,6 +248,8 @@
     appendBotPayload({
       answer: greeting,
       intent: 'greeting',
+      engine_used: 'offline',
+      engine_label: 'On-board',
       sources: 'offline_ai_chatbot'
     });
   }
@@ -155,7 +273,10 @@
     setBusy(true);
     var typingRow = appendTypingRow();
 
-    var payload = { question: question };
+    var payload = {
+      question: question,
+      engine: state.engine === 'online' && state.onlineStatus.available ? 'online' : 'offline'
+    };
     if (state.session && state.session.role === 'doctor' && state.selectedAstronautId) {
       payload.astronaut_id = state.selectedAstronautId;
     }
@@ -177,6 +298,8 @@
           appendBotPayload({
             refused: true,
             intent: 'error',
+            engine_used: 'offline',
+            engine_label: 'On-board',
             answer: (result.body && result.body.detail) || 'Unable to process this request.'
           });
           return;
@@ -188,6 +311,8 @@
         appendBotPayload({
           refused: true,
           intent: 'error',
+          engine_used: 'offline',
+          engine_label: 'On-board',
           answer: 'Connection error while contacting the Vitalverse chatbot backend.'
         });
       })
@@ -243,6 +368,20 @@
     }
   }
 
+  if (engineOfflineBtn) {
+    engineOfflineBtn.addEventListener('click', function () {
+      setEngine('offline');
+    });
+  }
+
+  if (engineOnlineBtn) {
+    engineOnlineBtn.addEventListener('click', function () {
+      if (!engineOnlineBtn.disabled) {
+        setEngine('online');
+      }
+    });
+  }
+
   if (astronautSelect) {
     astronautSelect.addEventListener('change', function () {
       state.selectedAstronautId = astronautSelect.value || null;
@@ -282,6 +421,8 @@
   }
 
   function start() {
+    applyEngineUi();
+    fetchOnlineStatus();
     if (window.VV_SHELL && typeof window.VV_SHELL.getSession === 'function') {
       window.VV_SHELL.getSession().then(hydrateSubject);
     } else {

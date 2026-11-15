@@ -162,8 +162,9 @@
     if (bellBtn) {
       bellBtn.addEventListener('click', function (e) {
         e.stopPropagation();
-        if (!bellDrop) {
-          window.location.href = 'alerts.html';
+        if (!state.authenticated || !bellDrop) {
+          closeAllMenus();
+          openWelcomeModal();
           return;
         }
         var isOpen = !bellDrop.hasAttribute('hidden');
@@ -171,6 +172,7 @@
         if (!isOpen) {
           bellDrop.removeAttribute('hidden');
           bellBtn.setAttribute('aria-expanded', 'true');
+          refreshBellDropdown();
         }
       });
     }
@@ -234,31 +236,215 @@
     });
   }
 
+  function toast(title, message, severity) {
+    var stack = document.getElementById('vvToastStack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.id = 'vvToastStack';
+      stack.className = 'vv-toast-stack';
+      document.body.appendChild(stack);
+    }
+    var sev = String(severity || 'info').toLowerCase();
+    var cls = 'vv-toast';
+    if (sev === 'danger' || sev === 'danger-confirm') cls += ' vv-toast--danger';
+    else if (sev === 'warning') cls += ' vv-toast--warn';
+
+    var el = document.createElement('div');
+    el.className = cls;
+    el.innerHTML =
+      '<div style="flex:1;min-width:0">' +
+        '<p class="vv-toast-title">' + esc(title || 'Notice') + '</p>' +
+        '<a class="vv-toast-body" href="/alerts.html">' + esc(message || '') + '</a>' +
+      '</div>' +
+      '<button type="button" class="vv-toast-close" aria-label="Dismiss">&times;</button>';
+
+    var closeBtn = el.querySelector('.vv-toast-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+    }
+    stack.appendChild(el);
+    while (stack.children.length > 4) {
+      stack.removeChild(stack.firstChild);
+    }
+    window.setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 6500);
+  }
+
+  function renderBanner(unackDanger, latestDanger) {
+    var existing = document.getElementById('vvDangerBanner');
+    var count = Number(unackDanger) || 0;
+    if (!state.authenticated || count <= 0) {
+      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+      return;
+    }
+    if (!existing) {
+      var nav = document.querySelector('header.vv-nav');
+      if (!nav || !nav.parentNode) return;
+      existing = document.createElement('div');
+      existing.id = 'vvDangerBanner';
+      existing.className = 'vv-banner';
+      nav.parentNode.insertBefore(existing, nav.nextSibling);
+    }
+    var detail = latestDanger && latestDanger.short_message
+      ? latestDanger.short_message
+      : (count + ' unacknowledged medical danger alert(s). Contact your flight surgeon immediately.');
+    existing.innerHTML =
+      '<span><strong>MEDICAL DANGER:</strong> ' + esc(detail) + '</span>' +
+      '<a href="/alerts.html">Review in Alerts Center</a>';
+  }
+
+  function refreshBellDropdown() {
+    if (!state.authenticated) return Promise.resolve();
+    var bellDrop = document.getElementById('vvBellDropdown');
+    var bellList = document.getElementById('vvBellList');
+    return fetch('/api/alerts?limit=6', { credentials: 'same-origin' })
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (data) {
+        if (!data) return;
+        updateBell(data.unread_count || 0, data.unack_danger_count || 0);
+        var items = Array.isArray(data.items) ? data.items : [];
+        var unackDangerItem = null;
+        for (var i = 0; i < items.length; i += 1) {
+          if (!items[i].acknowledged_at && (items[i].severity === 'danger' || items[i].severity === 'danger-confirm')) {
+            unackDangerItem = items[i];
+            break;
+          }
+        }
+        renderBanner(data.unack_danger_count || 0, unackDangerItem);
+
+        if (bellDrop) {
+          var head = bellDrop.querySelector('.vv-dropdown-head');
+          if (head) {
+            head.innerHTML =
+              '<strong>Alerts (' + Number(data.unread_count || 0) + ' unread)</strong>' +
+              '<span class="vv-dropdown-actions">' +
+                '<button type="button" class="vv-dropdown-btn" id="vvBellMarkAllBtn">Mark all read</button>' +
+                '<a class="vv-dropdown-link" href="/alerts.html">View all</a>' +
+              '</span>';
+            var markBtn = document.getElementById('vvBellMarkAllBtn');
+            if (markBtn) {
+              markBtn.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                var headers = {};
+                if (state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
+                fetch('/api/alerts/read-all', {
+                  method: 'POST',
+                  headers: headers,
+                  credentials: 'same-origin'
+                }).then(function () {
+                  refreshBellDropdown();
+                  window.dispatchEvent(new CustomEvent('vv:alert', { detail: { refreshed: true } }));
+                });
+              });
+            }
+          }
+        }
+
+        if (bellList) {
+          if (!items.length) {
+            bellList.innerHTML = '<div class="vv-dropdown-empty">All clear. No alerts.</div>';
+          } else {
+            bellList.innerHTML = items.map(function (it) {
+              var mod = (it.severity === 'danger' || it.severity === 'danger-confirm')
+                ? ' vv-dropdown-item--danger'
+                : (it.severity === 'warning' ? ' vv-dropdown-item--warn' : '');
+              return (
+                '<a class="vv-dropdown-item' + mod + '" href="/alerts.html" style="display:block;text-decoration:none">' +
+                  '<strong>' + esc(String(it.severity || 'info').toUpperCase()) + (it.mission_day != null ? ' · Day ' + esc(it.mission_day) : '') + '</strong>' +
+                  '<small>' + esc(it.short_message || '') + '</small>' +
+                '</a>'
+              );
+            }).join('');
+          }
+        }
+      })
+      .catch(function () {});
+  }
+
+  function connectAlertStream() {
+    if (!state.authenticated || typeof window.EventSource !== 'function' || state.sse) return;
+    try {
+      var es = new window.EventSource('/api/alerts/stream');
+      state.sse = es;
+      es.addEventListener('alert', function (ev) {
+        var payload = {};
+        try { payload = JSON.parse(ev.data || '{}'); } catch (_) {}
+        toast(
+          (payload.severity ? String(payload.severity).toUpperCase() : 'NEW') + ' ALERT',
+          payload.short_message || 'New mission health alert received.',
+          payload.severity || 'info'
+        );
+        refreshBellDropdown();
+        window.dispatchEvent(new CustomEvent('vv:alert', { detail: payload }));
+      });
+      window.addEventListener('beforeunload', function () {
+        if (state.sse) {
+          try { state.sse.close(); } catch (_) {}
+          state.sse = null;
+        }
+      });
+    } catch (_) {}
+  }
+
   function renderProfileMenu(data) {
     var avatar = document.getElementById('vvAvatar');
     var profDrop = document.getElementById('vvProfileDropdown');
     var u = (data && data.user) || {};
     if (avatar) {
-      avatar.textContent = u.initials || 'VV';
+      var avUrl = safeUrl(u.avatar_url || '');
+      if (avUrl) {
+        avatar.innerHTML = '<img src="' + esc(avUrl) + '" alt="' + esc(u.name || 'Avatar') + '" />';
+        var img = avatar.querySelector('img');
+        if (img) {
+          var fallbackToGradient = function () {
+            avatar.textContent = u.initials || '';
+          };
+          img.addEventListener('error', fallbackToGradient);
+          if (img.complete && img.naturalWidth === 0) {
+            fallbackToGradient();
+          }
+        }
+      } else {
+        avatar.textContent = u.initials || '';
+      }
     }
     if (!profDrop) return;
 
     var roleLabel = data.role === 'doctor' ? 'Doctor / Flight Surgeon' : 'Astronaut';
     var subMeta = u.astronaut_id ? esc(u.vitalverse_id + ' · ' + u.astronaut_id) : esc(u.vitalverse_id || '');
+    var pendingCount = Number(data.pending_access_count || data.pending_access_requests || 0);
+    var roleItems = data.role === 'doctor'
+      ? '<a class="vv-profile-item" href="/doctor-dashboard.html">My astronauts</a>'
+      : '<a class="vv-profile-item" href="/profile.html#access">Access requests' + (pendingCount > 0 ? '<span class="vv-count-pill">' + pendingCount + '</span>' : '') + '</a>';
+
     profDrop.innerHTML =
       '<div class="vv-dropdown-head" style="flex-direction:column;align-items:flex-start;gap:4px;">' +
         '<strong>' + esc(u.name || u.vitalverse_id || 'Crew Member') + '</strong>' +
         '<span style="font-size:11px;color:#a8e07a;font-weight:600;">' + subMeta + '</span>' +
         '<span style="font-size:11px;color:#9ba5ab;">' + esc(roleLabel) + '</span>' +
       '</div>' +
+      '<a class="vv-profile-item" href="/profile.html">My profile</a>' +
+      roleItems +
       '<a class="vv-profile-item" href="/health.html">Health dashboard</a>' +
       '<a class="vv-profile-item" href="/chatbot.html">Ai chatbot</a>' +
       '<a class="vv-profile-item" href="/mental.html">Mental Health</a>' +
+      '<a class="vv-profile-item" href="/todo.html">Daily Routine</a>' +
+      '<a class="vv-profile-item" href="/alerts.html">Alerts Center</a>' +
       '<button type="button" class="vv-profile-item vv-profile-item--danger" id="vvLogoutBtn">Log out</button>';
 
     var logoutBtn = document.getElementById('vvLogoutBtn');
     if (logoutBtn) {
       logoutBtn.addEventListener('click', function () {
+        if (state.sse) {
+          try { state.sse.close(); } catch (_) {}
+          state.sse = null;
+        }
         var headers = {};
         if (state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
         fetch('/api/auth/logout', {
@@ -278,16 +464,29 @@
 
   var _sessionPromise = null;
 
-  function hydrateSessionIfAvailable() {
+  function hydrateSessionIfAvailable(forceRefresh) {
     if (window.location.protocol === 'file:' || typeof window.fetch !== 'function') {
-      return Promise.resolve({ authenticated: false });
+      return Promise.resolve({ authenticated: false, backendAvailable: false });
+    }
+    if (forceRefresh) {
+      _sessionPromise = null;
     }
     if (_sessionPromise) return _sessionPromise;
 
     _sessionPromise = fetch('/api/auth/me', { credentials: 'same-origin' })
       .then(function (res) {
-        if (!res.ok) return { authenticated: false };
-        return res.json();
+        if (!res.ok) {
+          return {
+            authenticated: false,
+            backendAvailable: res.status !== 404 && res.status !== 501
+          };
+        }
+        return res.json().then(function (parsed) {
+          if (parsed && typeof parsed === 'object') {
+            parsed.backendAvailable = true;
+          }
+          return parsed;
+        });
       })
       .then(function (data) {
         if (data && data.authenticated) {
@@ -297,13 +496,19 @@
           state.csrfToken = data.csrf_token || null;
           setTodoProgress(data.todo_percent || 0);
           updateBell(data.unread_alert_count || 0, data.unack_danger_count || 0);
+          renderBanner(data.unack_danger_count || 0, null);
           renderProfileMenu(data);
+          refreshBellDropdown();
+          connectAlertStream();
+        } else {
+          renderBanner(0, null);
         }
-        document.dispatchEvent(new CustomEvent('vv:session', { detail: data || { authenticated: false } }));
-        return data || { authenticated: false };
+        var payload = data || { authenticated: false, backendAvailable: true };
+        document.dispatchEvent(new CustomEvent('vv:session', { detail: payload }));
+        return payload;
       })
       .catch(function () {
-        var fallback = { authenticated: false };
+        var fallback = { authenticated: false, backendAvailable: false };
         document.dispatchEvent(new CustomEvent('vv:session', { detail: fallback }));
         return fallback;
       });
@@ -316,14 +521,16 @@
     state: state,
     setTodoProgress: setTodoProgress,
     updateBell: updateBell,
+    toast: toast,
     openWelcomeModal: openWelcomeModal,
-    getSession: hydrateSessionIfAvailable,
+    getSession: function () { return hydrateSessionIfAvailable(false); },
+    refreshSession: function () { return hydrateSessionIfAvailable(true); },
     init: function () {
       initActiveMenu();
       wireControls();
       setTodoProgress(0);
       updateBell(0, 0);
-      hydrateSessionIfAvailable();
+      hydrateSessionIfAvailable(false);
     }
   };
 

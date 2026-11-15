@@ -1,27 +1,52 @@
-"""Offline AI Chatbot service wrapping OfflineChatbot with strict RBAC and urgent escalation."""
+"""Hybrid AI Chatbot service wrapping OfflineChatbot and OnlineLLM with RBAC, safety, and rate limits."""
 from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from offline_ai_chatbot import OfflineChatbot
+from backend.config import ONLINE_RATE_LIMIT_MAX_MESSAGES, ONLINE_RATE_LIMIT_WINDOW_SECONDS
 from backend.security import resolve_authorized_astronaut_id
+from backend.services import online_llm
+from offline_ai_chatbot import OfflineChatbot, _normalize
 
 _PERSONAL_PRONOUNS = re.compile(r"\b(my|mine|i|me|myself|am i|do i|have i|did i)\b", re.IGNORECASE)
 _PERSONAL_TOPICS = re.compile(
     r"\b(heart rate|blood pressure|bp|spo2|oxygen|temperature|glucose|sugar|sleep|mood|immune|bone|muscle|"
     r"cortisol|hormone|alert|warning|danger|status|baseline|to ?do|task|profile|weight|height|allerg|"
-    r"chest pain|left arm|passed out|fainted|short of breath|dizzy|lightheaded|headache|pain)\b",
+    r"chest pain|left arm|passed out|fainted|short of breath|confused|confusion|disoriented|dizzy|lightheaded|headache|pain)\b",
     re.IGNORECASE,
 )
 
 
 class ChatService:
-    """Thread-safe wrapper around OfflineChatbot using startup-loaded resources."""
+    """Thread-safe orchestrator for On-board (offline) and Online AI assistants."""
 
     def __init__(self) -> None:
         self.bot = OfflineChatbot()
+
+    @staticmethod
+    def _check_and_record_rate_limit(con: sqlite3.Connection, rate_key: str) -> bool:
+        """Return True if user/client is within 20 online messages per 10 minutes (and record attempt)."""
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=ONLINE_RATE_LIMIT_WINDOW_SECONDS)).isoformat()
+        con.execute("DELETE FROM online_chat_rate_limits WHERE created_at < ?", (cutoff,))
+        cnt = int(
+            con.execute(
+                "SELECT COUNT(*) FROM online_chat_rate_limits WHERE rate_key = ? AND created_at >= ?",
+                (rate_key, cutoff),
+            ).fetchone()[0]
+        )
+        if cnt >= ONLINE_RATE_LIMIT_MAX_MESSAGES:
+            con.commit()
+            return False
+        con.execute(
+            "INSERT INTO online_chat_rate_limits(rate_key, created_at) VALUES (?, ?)",
+            (rate_key, now.isoformat()),
+        )
+        con.commit()
+        return True
 
     def ask(
         self,
@@ -29,8 +54,12 @@ class ChatService:
         user: dict[str, Any] | None,
         question: str,
         requested_astronaut_id: str | None = None,
+        *,
+        engine: str = "offline",
+        client_id: str = "anonymous",
     ) -> dict[str, Any]:
-        """Answer or refuse a user query cleanly while enforcing server-session RBAC."""
+        """Answer or refuse cleanly, running local safety + scope checks first for both engines."""
+        req_engine = "online" if str(engine or "offline").strip().lower() == "online" else "offline"
         q = str(question or "").strip()
         if not q:
             return {
@@ -41,6 +70,12 @@ class ChatService:
                 "intent": "refusal",
                 "answer": "Please enter a question about your health telemetry, alerts, or countermeasures.",
                 "sources": "none",
+                "engine_requested": req_engine,
+                "engine_used": "offline",
+                "engine_provider": "offline",
+                "engine_label": "On-board",
+                "fallback_notice": None,
+                "rate_limited": False,
             }
 
         target_aid: str | None = None
@@ -66,6 +101,12 @@ class ChatService:
                             "intent": "refusal",
                             "answer": "No approved astronaut links exist for your doctor account yet.",
                             "sources": "doctor_astronaut_links",
+                            "engine_requested": req_engine,
+                            "engine_used": "offline",
+                            "engine_provider": "offline",
+                            "engine_label": "On-board",
+                            "fallback_notice": None,
+                            "rate_limited": False,
                         }
                     candidate = first["astronaut_id"]
                 target_aid = resolve_authorized_astronaut_id(con, user, candidate)
@@ -77,13 +118,10 @@ class ChatService:
             if prof:
                 astronaut_name = prof["name"]
                 surgeon_contact = prof["contact_flight_surgeon"]
-            raw = self.bot.ask(target_aid, q)
+            offline_res = self.bot.ask(target_aid, q)
         else:
-            # Logged-out users: evaluate scope safely using a non-existent placeholder so no DB telemetry leaks;
-            # personal "my ..." questions get a clean login prompt card rather than guessing values.
-            norm_q = q.lower()
-            is_urgent = self.bot.is_urgent_symptom(q, norm_q)
-            if is_urgent:
+            norm_q = _normalize(q)
+            if self.bot.is_urgent_symptom(q, norm_q):
                 return {
                     "ok": True,
                     "refused": False,
@@ -92,19 +130,24 @@ class ChatService:
                     "intent": "alerts",
                     "confidence": 1.0,
                     "answer": (
-                        "URGENT ESCALATION: Contact the flight surgeon immediately (Ground Medical Control). "
-                        "Stop current exertion and initiate real-time ground medical telemetry review.\n"
-                        "Please log in with your crew account if you also want to view your active onboard telemetry alerts."
+                        "URGENT ESCALATION: Contact the flight surgeon immediately — please contact your flight surgeon now "
+                        "(Ground Medical Control). Stop current exertion and start real-time ground telemetry review.\n"
+                        "Please sign in with your crew account if you also want to view active onboard alerts."
                     ),
                     "sources": "urgent_symptom_escalation",
                     "did_you_mean": None,
                     "flight_surgeon_contact": "Flight Surgeon Desk (Ground Control)",
+                    "engine_requested": req_engine,
+                    "engine_used": "offline",
+                    "engine_provider": "offline",
+                    "engine_label": "On-board",
+                    "fallback_notice": None,
+                    "rate_limited": False,
                 }
 
-            # Check non-personal / out-of-scope questions first (e.g. "What's the temperature on Venus?").
             probe = self.bot.ask("A001", q)
             if probe.get("refused"):
-                raw = probe
+                offline_res = probe
             elif _PERSONAL_PRONOUNS.search(q) or _PERSONAL_TOPICS.search(q):
                 return {
                     "ok": True,
@@ -116,15 +159,68 @@ class ChatService:
                     "answer": "Sign in to your astronaut or approved doctor account so I can answer using your real mission telemetry and pre-flight baseline.",
                     "sources": "authentication",
                     "did_you_mean": None,
+                    "engine_requested": req_engine,
+                    "engine_used": "offline",
+                    "engine_provider": "offline",
+                    "engine_label": "On-board",
+                    "fallback_notice": None,
+                    "rate_limited": False,
                 }
             else:
-                raw = probe
+                offline_res = probe
 
-        return {
+        base_payload: dict[str, Any] = {
             "ok": True,
             "astronaut_id": target_aid,
             "astronaut_name": astronaut_name,
             "flight_surgeon_contact": surgeon_contact,
             "login_required": False,
-            **raw,
+            **offline_res,
+            "engine_requested": req_engine,
+            "engine_used": "offline",
+            "engine_provider": "offline",
+            "engine_label": "On-board",
+            "fallback_notice": None,
+            "rate_limited": False,
+        }
+
+        # Safety gate & scope gate MUST block offline/online equally before any external API call.
+        if req_engine != "online" or offline_res.get("urgent_escalation") or offline_res.get("refused"):
+            return base_payload
+
+        rate_key = f"user:{int(user['user_id'])}" if user is not None else f"guest:{client_id}"
+        if not self._check_and_record_rate_limit(con, rate_key):
+            return {
+                **base_payload,
+                "rate_limited": True,
+                "fallback_notice": (
+                    f"You have reached the {ONLINE_RATE_LIMIT_MAX_MESSAGES}-message limit for the online assistant "
+                    "in a 10-minute window. Answered by the on-board assistant below."
+                ),
+            }
+
+        summary_text, meta = online_llm.build_privacy_safe_summary(con, target_aid)
+        try:
+            llm_out = online_llm.generate_with_fallback(q, summary_text)
+        except online_llm.OnlineProviderError:
+            return {
+                **base_payload,
+                "fallback_notice": "Online unavailable, answered by the on-board assistant.",
+            }
+
+        online_answer = online_llm.finalize_online_answer(
+            llm_out["text"],
+            question=q,
+            first_name=meta.get("first_name"),
+            has_warning_or_danger=bool(meta.get("has_warning_or_danger")),
+        )
+        return {
+            **base_payload,
+            "answer": online_answer,
+            "sources": f"{llm_out['provider_label']} ({llm_out['model']}) + PII-free mission telemetry summary",
+            "engine_used": "online",
+            "engine_provider": llm_out["provider"],
+            "engine_label": llm_out["provider_label"],
+            "model": llm_out["model"],
+            "fallback_notice": None,
         }
