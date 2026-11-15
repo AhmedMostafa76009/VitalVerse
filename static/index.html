@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vitalverse</title>
+
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="stylesheet" href="css/shell.css">
+
+<style>
+:root {
+  --green:#a8e07a;
+  --green-btn:#e4f7c8;
+  --text:#ffffff;
+  --line:rgba(255,255,255,.22);
+}
+
+* {
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
+}
+
+html,body {
+  background:#000;
+  font-family:'Inter',system-ui,sans-serif;
+  color:var(--text);
+}
+
+.hero {
+  position:relative;
+  width:100%;
+  max-width:1600px;
+  margin:0 auto;
+  aspect-ratio:16/9;
+  overflow:hidden;
+  container-type:inline-size;
+  background:#000;
+}
+
+.hero > img.bg {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+}
+
+/* NAVBAR */
+
+.nav {
+  position:absolute;
+  top:3.4cqw;
+  left:3.6cqw;
+  right:3.6cqw;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  z-index:5;
+}
+
+.logo {
+  display:flex;
+  align-items:center;
+  gap:.7cqw;
+  font-size:2.15cqw;
+  font-weight:600;
+  letter-spacing:.02cqw;
+}
+
+.logo svg {
+  width:3.6cqw;
+  height:2.2cqw;
+}
+
+.logo span b {
+  color:var(--green);
+  font-weight:600;
+}
+
+.menu {
+  display:flex;
+  gap:.4cqw;
+  padding:.5cqw;
+  border:1px solid var(--line);
+  border-radius:10cqw;
+  background:rgba(10,12,14,.55);
+  backdrop-filter:blur(6px);
+}
+
+.menu a {
+  color:#d9dde0;
+  text-decoration:none;
+  font-size:1.05cqw;
+  font-weight:500;
+  padding:.85cqw 1.6cqw;
+  border-radius:10cqw;
+  white-space:nowrap;
+  transition:.25s;
+}
+
+.menu a:hover {
+  color:#fff;
+  background:rgba(255,255,255,.08);
+}
+
+.menu a.active {
+  color:#fff;
+  background:rgba(255,255,255,.12);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);
+}
+
+.tools {
+  display:flex;
+  align-items:center;
+  gap:1cqw;
+}
+
+.circle {
+  width:3.2cqw;
+  height:3.2cqw;
+  border-radius:50%;
+  border:1px solid var(--line);
+  background:rgba(10,12,14,.55);
+  display:grid;
+  place-items:center;
+  position:relative;
+  cursor:pointer;
+  padding:0;
+  color:inherit;
+  font:inherit;
+}
+
+.circle svg {
+  width:1.4cqw;
+  height:1.4cqw;
+  stroke:#fff;
+  fill:none;
+  stroke-width:1.6;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+
+.dot {
+  position:absolute;
+  top:.2cqw;
+  right:.25cqw;
+  width:.7cqw;
+  height:.7cqw;
+  border-radius:50%;
+  background:#7ee04a;
+}
+
+.profile {
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  gap:.6cqw;
+  height:3.2cqw;
+  padding:0 1cqw 0 .3cqw;
+  border-radius:10cqw;
+  border:1px solid var(--line);
+  background:rgba(10,12,14,.55);
+}
+
+.avatar {
+  width:2.5cqw;
+  height:2.5cqw;
+  border-radius:50%;
+  background:radial-gradient(circle at 35% 35%,#d7dbe0,#5b636b 60%,#1b1f23);
+}
+
+.profile svg {
+  width:1cqw;
+  height:1cqw;
+  stroke:#fff;
+  fill:none;
+  stroke-width:2;
+}
+
+/* HERO TEXT */
+
+.content {
+  position:absolute;
+  left:6.4cqw;
+  top:27%;
+  z-index:5;
+}
+
+h1 {
+  font-size:5.9cqw;
+  line-height:1.08;
+  font-weight:500;
+  letter-spacing:-.1cqw;
+}
+
+h1 em {
+  font-style:normal;
+  color:var(--green);
+}
+
+.tag {
+  margin-top:1.3cqw;
+  font-size:1.95cqw;
+  font-weight:400;
+  color:#f1f3f4;
+}
+
+.desc {
+  margin-top:2.4cqw;
+  padding-left:1.1cqw;
+  border-left:2px solid rgba(168,224,122,.6);
+  font-size:1.3cqw;
+  line-height:1.5;
+  color:#d7dbde;
+  max-width:24cqw;
+}
+
+.btns {
+  display:flex;
+  gap:1.1cqw;
+  margin-top:2.8cqw;
+}
+
+.btn {
+  display:inline-flex;
+  align-items:center;
+  gap:.8cqw;
+  height:4.7cqw;
+  padding:0 2.2cqw;
+  border-radius:10cqw;
+  font-size:1.3cqw;
+  font-weight:500;
+  text-decoration:none;
+  cursor:pointer;
+  transition:.25s;
+}
+
+.btn svg {
+  width:1.5cqw;
+  height:1.5cqw;
+  stroke:currentColor;
+  fill:none;
+  stroke-width:1.8;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+
+.btn.primary {
+  background:var(--green-btn);
+  color:#0b0f0a;
+  box-shadow:0 0 2.5cqw rgba(168,224,122,.35);
+}
+
+.btn.primary:hover {
+  transform:translateY(-2px);
+  box-shadow:0 0 3.5cqw rgba(168,224,122,.55);
+}
+
+/* DECORATIVE LINE */
+
+.sideline {
+  position:absolute;
+  left:1.6cqw;
+  top:19cqw;
+  height:17cqw;
+  width:1px;
+  background:linear-gradient(transparent,rgba(168,224,122,.7),transparent);
+  z-index:5;
+}
+
+.sideline::after {
+  content:"";
+  position:absolute;
+  left:-.25cqw;
+  top:50%;
+  width:.55cqw;
+  height:.55cqw;
+  border:1px solid #a8e07a;
+  border-radius:50%;
+}
+
+@media (max-width:900px) {
+  .menu a {
+    padding:.8cqw 1cqw;
+  }
+}
+
+/* WELCOME MODAL */
+
+.welcome-overlay {
+  position:fixed;
+  inset:0;
+  z-index:1000;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background:rgba(0,0,0,.75);
+  backdrop-filter:blur(7px);
+}
+
+.welcome-overlay.show {
+  display:flex;
+}
+
+.welcome-modal {
+  position:relative;
+  width:350px;
+  max-width:90%;
+  padding:36px 32px;
+  background:#101719;
+  border:1px solid rgba(168,224,122,.22);
+  border-radius:21px;
+  text-align:center;
+}
+
+.welcome-modal h2 {
+  font-size:22px;
+  margin-bottom:12px;
+}
+
+.welcome-modal h2 span {
+  color:var(--green);
+}
+
+.welcome-modal p {
+  color:#aeb6ba;
+  font-size:12px;
+  line-height:1.7;
+  margin-bottom:25px;
+}
+
+.close-modal {
+  position:absolute;
+  top:12px;
+  right:15px;
+  background:none;
+  border:none;
+  color:white;
+  font-size:23px;
+  cursor:pointer;
+}
+
+.close-modal:hover {
+  color:var(--green);
+}
+
+.create-account-btn {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  height:43px;
+  background:var(--green-btn);
+  color:#101510;
+  border-radius:30px;
+  text-decoration:none;
+  font-size:13px;
+  font-weight:600;
+  transition:.25s;
+}
+
+.create-account-btn:hover {
+  background:var(--green);
+  transform:translateY(-2px);
+}
+
+.login-modal-btn {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  height:41px;
+  margin-top:10px;
+  background:transparent;
+  color:#ffffff;
+  border:1px solid var(--line);
+  border-radius:30px;
+  text-decoration:none;
+  font-size:13px;
+  font-weight:500;
+  transition:.25s;
+}
+
+.login-modal-btn:hover {
+  border-color:rgba(168,224,122,.55);
+  color:var(--green);
+}
+</style>
+</head>
+
+<body>
+
+<section class="hero">
+
+  <img class="bg" src="img/astronaut.png" alt="Astronaut">
+
+  <div class="sideline"></div>
+
+  <header class="nav">
+
+    <div class="logo">
+      <svg viewBox="0 0 36 22" fill="none" stroke="#a8e07a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 11h7l3-8 5 16 4-12 3 4h12"/>
+      </svg>
+      <span>Vital<b>verse</b></span>
+    </div>
+
+    <nav class="menu" id="vvNavMenu">
+      <a href="index.html" class="active">Home page</a>
+      <a href="health.html">Health dashboard</a>
+      <a href="chatbot.html">Ai chatbot</a>
+      <a href="mental.html">Mental Health</a>
+      <a href="about.html">About</a>
+    </nav>
+
+    <div class="tools">
+
+      <button class="circle" id="todoBtn" type="button" aria-label="Daily Routine To-Do List">
+        <svg viewBox="0 0 24 24">
+          <rect x="5" y="4.5" width="14" height="16.5" rx="2.5"/>
+          <path d="M9 4.5V3.5h6v1"/>
+          <path d="M8.5 11.5l1.2 1.2 2.1-2.4M8.5 16.5l1.2 1.2 2.1-2.4M14.2 11.8h2M14.2 16.8h2"/>
+        </svg>
+        <svg class="vv-todo-ring" id="vvTodoRing" viewBox="0 0 39 39" hidden>
+          <circle cx="19.5" cy="19.5" r="18" fill="none" stroke="#a8e07a" stroke-width="2" id="vvTodoRingArc"/>
+        </svg>
+      </button>
+
+      <div class="profile-menu">
+        <button class="profile" id="profileBtn" type="button" aria-label="Open account options" aria-expanded="false">
+          <div class="avatar" id="vvAvatar"></div>
+          <svg viewBox="0 0 24 24">
+            <path d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="vv-dropdown vv-profile-menu" id="vvProfileDropdown" hidden></div>
+
+    </div>
+  </header>
+
+  <div class="content">
+
+    <h1>
+      AI Health Care<br>
+      for <em>Astronauts</em>
+    </h1>
+
+    <p class="tag">
+      Monitor. Protect. Keep exploring.
+    </p>
+
+    <p class="desc">
+      Advanced health monitoring for a healthier journey beyond Earth.
+    </p>
+
+    <div class="btns">
+      <a class="btn primary" id="launchMissionBtn" href="login.html">
+
+        <svg viewBox="0 0 24 24">
+          <path d="M2 12h5l2-5 4 10 3-7 1 2h5"/>
+        </svg>
+
+        Launch Mission
+
+        <svg viewBox="0 0 24 24">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+
+      </a>
+    </div>
+
+  </div>
+
+</section>
+
+<!-- WELCOME MODAL -->
+
+<div class="welcome-overlay" id="welcomeOverlay">
+
+  <div class="welcome-modal">
+
+    <button class="close-modal" id="closeModal" type="button">&times;</button>
+
+    <h2>
+      Welcome to <span>Vitalverse</span>
+    </h2>
+
+    <p>
+      Your health journey beyond Earth starts here.
+      <br>
+      Create your account to continue.
+    </p>
+
+    <a href="signup.html" class="create-account-btn">
+      Create an Account
+    </a>
+    <a href="login.html" class="login-modal-btn">
+      Log In
+    </a>
+
+  </div>
+
+</div>
+
+<script src="js/shell.js"></script>
+
+</body>
+</html>
